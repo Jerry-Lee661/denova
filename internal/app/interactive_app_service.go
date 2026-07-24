@@ -50,6 +50,23 @@ func (s *InteractiveAppService) InteractiveStories() (interactive.Index, error) 
 	return store.Index()
 }
 
+func (a *App) SelectInteractiveStory(storyID string) error {
+	return a.interactiveService().SelectInteractiveStory(storyID)
+}
+
+func (s *InteractiveAppService) SelectInteractiveStory(storyID string) error {
+	store := s.store()
+	if store == nil {
+		return ErrNoWorkspace
+	}
+	log.Printf("[interactive-story] persist current story selection story_id=%s", storyID)
+	if err := store.SelectStory(storyID); err != nil {
+		log.Printf("[interactive-story] persist current story selection failed story_id=%s err=%v", storyID, err)
+		return err
+	}
+	return nil
+}
+
 func (a *App) CreateInteractiveStory(req interactive.CreateStoryRequest) (interactive.StorySummary, error) {
 	return a.interactiveService().CreateInteractiveStoryContext(context.Background(), req)
 }
@@ -128,6 +145,8 @@ func (s *InteractiveAppService) withStoryDirectorDefaults(req interactive.Create
 	if interactive.StoryDirectorImagePresetEnabled(director) && strings.TrimSpace(req.ImageSettings.PresetID) == "" && strings.TrimSpace(director.ModuleRefs.ImagePresetID) != "" {
 		req.ImageSettings.PresetID = strings.TrimSpace(director.ModuleRefs.ImagePresetID)
 	}
+	directorRunPolicy := interactive.ResolveStoryDirectorRunPolicy(req.DirectorRunPolicy, director.Strategy)
+	req.DirectorRunPolicy = &directorRunPolicy
 	openingSummary := openingSummaryFromStateOps(req.InitialStateOps)
 	req.DirectorPlanSeed = &interactive.DirectorPlanSeed{
 		Templates:           director.Strategy.PlanningTemplates,
@@ -142,19 +161,43 @@ func (s *InteractiveAppService) withStoryDirectorDefaults(req interactive.Create
 		req.DirectorPlanSeed.InitialStatus = interactive.DirectorPlanStatusSkipped
 		req.DirectorPlanSeed.InitialSummary = "后台导演已关闭，跳过开局规划。"
 		req.DirectorPlanSeed.StartReady = true
+	} else if directorRunPolicy.Mode == interactive.DirectorRunModeManual {
+		req.DirectorPlanSeed.InitialStatus = interactive.DirectorPlanStatusSkipped
+		req.DirectorPlanSeed.InitialSummary = "后台导演设为仅手动运行。"
+		req.DirectorPlanSeed.StartReady = true
 	}
-	req.ActorState = &director.ActorState
+	policy := interactive.StoryStateSchemaPolicy{Mode: interactive.StoryStateSchemaModeAdaptTemplate}
+	if req.StateSchemaPolicy != nil {
+		policy = interactive.NormalizeStoryStateSchemaPolicy(*req.StateSchemaPolicy)
+	}
+	req.StateSchemaPolicy = &policy
+	actorState := director.ActorState
+	if policy.Mode == interactive.StoryStateSchemaModeGenerate {
+		actorState = interactive.GeneratedStoryActorStateCore()
+	}
+	if len(actorState.Templates) == 0 && interactive.StoryStateSchemaPolicyUsesOpeningGameAgent(&policy) {
+		return req, fmt.Errorf("故事状态模板不可用 / Story state template is unavailable")
+	}
+	if len(actorState.Templates) > 0 {
+		req.ActorState = &actorState
+	} else {
+		req.ActorState = nil
+	}
 	req.TRPGSystem = &director.TRPGSystem
-	mode := director.Strategy.StateSchemaAdaptationMode
 	status := interactive.StateSchemaInitializationWaitingOpening
-	if mode == interactive.StateSchemaAdaptationModeOff || len(director.ActorState.Templates) == 0 {
-		mode = interactive.StateSchemaAdaptationModeOff
-		status = interactive.StateSchemaInitializationSkipped
+	outcome := ""
+	if policy.Mode == interactive.StoryStateSchemaModeFixedTemplate {
+		status = interactive.StateSchemaInitializationReady
+		outcome = "fixed"
 	}
 	req.StateSchemaInitialization = &interactive.StateSchemaInitializationStatus{
-		Mode:         mode,
+		Mode:         policy.Mode,
 		Status:       status,
+		Outcome:      outcome,
 		BaseRevision: 1,
+	}
+	if status == interactive.StateSchemaInitializationReady {
+		req.StateSchemaInitialization.TargetRevision = 1
 	}
 	if req.DirectorPlanSeed.OpeningSummary == "" {
 		req.DirectorPlanSeed.OpeningSummary = openingSummaryFromStateOps(req.InitialStateOps)
@@ -182,7 +225,62 @@ func (s *InteractiveAppService) UpdateInteractiveStory(storyID string, req inter
 	if store == nil {
 		return interactive.StorySummary{}, ErrNoWorkspace
 	}
+	if req.StateSchemaPolicy != nil {
+		var err error
+		req, err = s.withStoryStateSchemaUpdateDefaults(req)
+		if err != nil {
+			return interactive.StorySummary{}, err
+		}
+	}
 	return store.UpdateStory(storyID, req)
+}
+
+func (s *InteractiveAppService) withStoryStateSchemaUpdateDefaults(req interactive.UpdateStoryRequest) (interactive.UpdateStoryRequest, error) {
+	cfg := s.cfg()
+	if cfg == nil || cfg.DataDir() == "" || req.StateSchemaPolicy == nil {
+		return req, nil
+	}
+	directorID := interactive.NormalizeStoryDirectorID(req.StoryDirectorID)
+	if directorID == "" {
+		directorID = interactive.DefaultStoryDirectorID
+	}
+	director, err := interactive.NewStoryDirectorLibrary(cfg.DataDir()).Get(directorID)
+	if err != nil {
+		return req, fmt.Errorf("读取故事导演失败 / Failed to load story director: %w", err)
+	}
+	if req.ModuleRefs != nil {
+		director.ModuleRefs = interactive.NormalizeStoryDirectorModuleRefs(*req.ModuleRefs)
+		director.ResolvedSnapshot = interactive.StoryDirectorResolvedSnapshot{}
+		director = interactive.ResolveStoryDirectorModules(cfg.DataDir(), director)
+		normalized := interactive.NormalizeStoryDirectorModuleRefs(director.ModuleRefs)
+		req.ModuleRefs = &normalized
+	}
+	policy := interactive.NormalizeStoryStateSchemaPolicy(*req.StateSchemaPolicy)
+	actorState := director.ActorState
+	if policy.Mode == interactive.StoryStateSchemaModeGenerate {
+		actorState = interactive.GeneratedStoryActorStateCore()
+	}
+	if len(actorState.Templates) == 0 && interactive.StoryStateSchemaPolicyUsesOpeningGameAgent(&policy) {
+		return req, fmt.Errorf("故事状态模板不可用 / Story state template is unavailable")
+	}
+	req.StateSchemaPolicy = &policy
+	if len(actorState.Templates) > 0 {
+		req.ActorState = &actorState
+	} else {
+		req.ActorState = nil
+	}
+	req.TRPGSystem = &director.TRPGSystem
+	status := interactive.StateSchemaInitializationWaitingOpening
+	outcome := ""
+	if policy.Mode == interactive.StoryStateSchemaModeFixedTemplate {
+		status = interactive.StateSchemaInitializationReady
+		outcome = "fixed"
+	}
+	req.StateSchemaInitialization = &interactive.StateSchemaInitializationStatus{Mode: policy.Mode, Status: status, Outcome: outcome, BaseRevision: 1}
+	if status == interactive.StateSchemaInitializationReady {
+		req.StateSchemaInitialization.TargetRevision = 1
+	}
+	return req, nil
 }
 
 func (a *App) DeleteInteractiveStory(storyID string) error {
@@ -212,105 +310,11 @@ func (a *App) InteractiveSnapshot(storyID, branchID string) (interactive.Snapsho
 }
 
 func (s *InteractiveAppService) InteractiveSnapshot(storyID, branchID string) (interactive.Snapshot, error) {
-	a := s.app
-	a.mu.RLock()
-	store := a.interactive
-	cfg := a.cfg
-	workspace := a.workspace
-	bookState := a.bookState
-	sessionStore := a.sessionStore
-	a.mu.RUnlock()
+	store := s.store()
 	if store == nil {
 		return interactive.Snapshot{}, ErrNoWorkspace
 	}
-	snapshot, err := store.Snapshot(storyID, branchID)
-	if err != nil || cfg == nil || bookState == nil || snapshot.CurrentTurn == nil || snapshot.StateSchemaInitialization == nil {
-		return snapshot, err
-	}
-	status := snapshot.StateSchemaInitialization.Status
-	if status != interactive.StateSchemaInitializationRunning {
-		return snapshot, nil
-	}
-	runtimeCfg := *cfg
-	runtimeCfg.Workspace = workspace
-	turn := *snapshot.CurrentTurn
-	conversation := newInteractiveConversation(store, runtimeCfg.DataDir(), workspace, storyID, snapshot.BranchID, turn.User, runtimeCfg.InteractiveReplyTargetChars, &runtimeCfg).bindDirectorRuntime(a.directorTasksForWorkspace(workspace), a.interactiveDirectorGenerator())
-	tasks := directorTasksForConversation(conversation)
-	key := interactiveStateSchemaMaintenanceKey(conversation, snapshot.BranchID)
-	if tasks.HasKey(key) {
-		return snapshot, nil
-	}
-	if _, resumeErr := store.ResumeInterruptedStateSchemaInitialization(storyID); resumeErr != nil {
-		log.Printf("[interactive-state-schema] resume state reset failed story_id=%s branch_id=%s err=%v", storyID, snapshot.BranchID, resumeErr)
-		return snapshot, nil
-	}
-	log.Printf("[interactive-state-schema] resume interrupted initialization story_id=%s branch_id=%s turn_id=%s", storyID, snapshot.BranchID, turn.ID)
-	startInteractiveStateSchemaTask(&runtimeCfg, bookState, conversation, turn, sessionStore)
-	return snapshot, nil
-}
-
-func (a *App) RetryInteractiveStateSchema(storyID string) (interactive.StateSchemaInitializationStatus, error) {
-	return a.interactiveService().RetryInteractiveStateSchema(storyID)
-}
-
-func (s *InteractiveAppService) RetryInteractiveStateSchema(storyID string) (interactive.StateSchemaInitializationStatus, error) {
-	return s.startInteractiveStateSchemaReview(storyID, (*interactive.Store).ResetStateSchemaInitialization)
-}
-
-func (a *App) ReviewInteractiveStateSchema(storyID string) (interactive.StateSchemaInitializationStatus, error) {
-	return a.interactiveService().ReviewInteractiveStateSchema(storyID)
-}
-
-func (s *InteractiveAppService) ReviewInteractiveStateSchema(storyID string) (interactive.StateSchemaInitializationStatus, error) {
-	return s.startInteractiveStateSchemaReview(storyID, (*interactive.Store).ReopenStateSchemaReview)
-}
-
-type stateSchemaReviewPreparer func(*interactive.Store, string) (interactive.StateSchemaInitializationStatus, error)
-
-func (s *InteractiveAppService) startInteractiveStateSchemaReview(storyID string, prepare stateSchemaReviewPreparer) (interactive.StateSchemaInitializationStatus, error) {
-	a := s.app
-	a.mu.RLock()
-	store := a.interactive
-	cfg := a.cfg
-	workspace := a.workspace
-	bookState := a.bookState
-	sessionStore := a.sessionStore
-	a.mu.RUnlock()
-	if store == nil || cfg == nil || bookState == nil {
-		return interactive.StateSchemaInitializationStatus{}, ErrNoWorkspace
-	}
-	status, err := prepare(store, storyID)
-	if err != nil {
-		return status, err
-	}
-	storyCtx, err := store.StoryContext(storyID, "")
-	if err != nil {
-		return status, err
-	}
-	if storyCtx.Snapshot.CurrentTurn == nil {
-		return status, fmt.Errorf("首轮正文尚未完成，状态结构将在首轮落盘后自动适配")
-	}
-	runtimeCfg := *cfg
-	runtimeCfg.Workspace = workspace
-	turn := *storyCtx.Snapshot.CurrentTurn
-	if len(storyCtx.Snapshot.Turns) > 0 {
-		turn = storyCtx.Snapshot.Turns[0]
-	}
-	conversation := newInteractiveConversation(store, runtimeCfg.DataDir(), workspace, storyID, storyCtx.Snapshot.BranchID, turn.User, storyCtx.Meta.ReplyTargetChars, &runtimeCfg).bindDirectorRuntime(a.directorTasksForWorkspace(workspace), a.interactiveDirectorGenerator())
-	startInteractiveStateSchemaTask(&runtimeCfg, bookState, conversation, turn, sessionStore)
-	return status, nil
-}
-
-func (a *App) SkipInteractiveStateSchema(storyID string) (interactive.StateSchemaInitializationStatus, error) {
-	return a.interactiveService().SkipInteractiveStateSchema(storyID)
-}
-
-func (s *InteractiveAppService) SkipInteractiveStateSchema(storyID string) (interactive.StateSchemaInitializationStatus, error) {
-	store := s.store()
-	if store == nil {
-		return interactive.StateSchemaInitializationStatus{}, ErrNoWorkspace
-	}
-	return store.SkipStateSchemaInitialization(storyID)
+	return store.Snapshot(storyID, branchID)
 }
 
 func (a *App) RerollInteractiveRuleResolution(storyID, resolutionID string, req interactive.RuleResolutionRerollRequest) (interactive.RuleResolution, error) {
@@ -758,6 +762,7 @@ func (s *InteractiveAppService) startInteractiveTask(ctx context.Context, storyI
 	store := a.interactive
 	state := a.bookState
 	bookService := a.bookService
+	versionService := a.versionService
 	chatService := a.chatService
 	sessionStore := a.sessionStore
 	runtimeCfg := *a.cfg
@@ -789,14 +794,19 @@ func (s *InteractiveAppService) startInteractiveTask(ctx context.Context, storyI
 	tellerSystemInput := interactiveStoryTellerSystemInput(teller, styleRules)
 	tellerSystemInput.ChoiceCount = storyCtx.Meta.ChoiceCount
 	baseParentID := storyCtx.Meta.Branches[storyCtx.Snapshot.BranchID].Head
-	conversation := newInteractiveConversation(store, novaDir, workspace, storyID, branchID, message, runtimeCfg.InteractiveReplyTargetChars, &runtimeCfg).bindDirectorRuntime(a.directorTasksForWorkspace(workspace), a.interactiveDirectorGenerator()).withBaseParentID(baseParentID)
+	conversation := newInteractiveConversation(store, novaDir, workspace, storyID, branchID, message, runtimeCfg.InteractiveReplyTargetChars, &runtimeCfg).bindDirectorRuntime(a.directorTasksForWorkspace(workspace), a.interactiveDirectorGenerator()).withBaseParentID(baseParentID).withOpeningStateSchema(storyCtx)
+	var submitOpeningStateSchema func(context.Context, interactive.ActorStateSchemaBatch) (interactive.ActorStateSchemaBatchResult, error)
+	if interactive.StoryStateSchemaPolicyUsesOpeningGameAgent(storyCtx.Meta.StateSchemaPolicy) && storyCtx.Meta.StateSchemaInitialization != nil && storyCtx.Meta.StateSchemaInitialization.Status == interactive.StateSchemaInitializationWaitingOpening && len(storyCtx.Snapshot.Turns) == 0 {
+		submitOpeningStateSchema = conversation.SubmitOpeningStateSchemaBatch
+	}
 	runner, err := buildInteractiveStoryRunner(ctx, &runtimeCfg, state, tellerSystemInput, agent.InteractiveStoryToolContext{
-		Store:            store,
-		StoryID:          storyID,
-		BranchID:         storyCtx.Snapshot.BranchID,
-		PrepareTurn:      conversation.PrepareInteractiveTurn,
-		SubmitTurnResult: conversation.SubmitTurnResult,
-		TurnResultReady:  conversation.InteractiveNarrativeReady,
+		Store:                  store,
+		StoryID:                storyID,
+		BranchID:               storyCtx.Snapshot.BranchID,
+		SubmitStateSchemaBatch: submitOpeningStateSchema,
+		PrepareTurn:            conversation.PrepareInteractiveTurn,
+		SubmitTurnResult:       conversation.SubmitTurnResult,
+		TurnResultReady:        conversation.InteractiveNarrativeReady,
 	})
 	if err != nil {
 		log.Printf("[interactive-agent-task] 刷新互动故事 Agent Runner 失败 workspace=%s err=%v", workspace, err)
@@ -816,14 +826,6 @@ func (s *InteractiveAppService) startInteractiveTask(ctx context.Context, storyI
 	}
 	task := NewTask(func(ctx context.Context, task *Task, emit func(agent.Event)) {
 		log.Printf("[interactive-agent-task] run begin id=%s story_id=%s branch_id=%s rewind_turn_id=%s message_len=%d style_scenes=%d", task.ID(), storyID, branchID, rewindTurnID, len(message), len(styleScenes))
-		maintenanceKey := interactiveStateSchemaMaintenanceKey(conversation, storyCtx.Snapshot.BranchID)
-		if tasks := directorTasksForConversation(conversation); tasks != nil {
-			if err := tasks.WaitKey(ctx, maintenanceKey); err != nil {
-				log.Printf("[interactive-agent-task] wait previous branch maintenance failed story_id=%s branch_id=%s err=%v", storyID, storyCtx.Snapshot.BranchID, err)
-				emit(agent.Event{Type: "error", Data: map[string]string{"message": "等待上一回合后台维护失败：" + err.Error()}})
-				return
-			}
-		}
 		if strings.TrimSpace(rewindTurnID) != "" {
 			if err := store.RewindToTurnParent(storyID, interactive.RewindTurnRequest{BranchID: branchID, TurnID: rewindTurnID}); err != nil {
 				log.Printf("[interactive-agent-task] 回退互动故事分支失败 story_id=%s branch_id=%s turn_id=%s err=%v", storyID, branchID, rewindTurnID, err)
@@ -841,37 +843,66 @@ func (s *InteractiveAppService) startInteractiveTask(ctx context.Context, storyI
 		}
 		persistedEmitted := false
 		maintenanceScheduled := false
-		scheduleMaintenance := func(turn interactive.TurnEvent) {
+		scheduleMaintenance := func(turn interactive.TurnEvent, persistedSnapshot *interactive.Snapshot) {
 			director := conversation.storyDirectorForMeta(storyCtx.Meta)
-			decision := shouldScheduleInteractiveDirectorAfterTurn(director.Strategy, turn)
-			log.Printf("[interactive-director-agent] maintenance decision story_id=%s branch_id=%s turn_id=%s run_plan=%t reason=%s", storyID, turn.BranchID, turn.ID, decision.ShouldRun, decision.Reason)
+			policy := interactive.ResolveStoryDirectorRunPolicy(storyCtx.Meta.DirectorRunPolicy, director.Strategy)
+			if persistedSnapshot == nil {
+				loaded, loadErr := store.Snapshot(storyID, turn.BranchID)
+				if loadErr != nil {
+					log.Printf("[interactive-director-agent] load scheduling snapshot failed story_id=%s branch_id=%s turn_id=%s err=%v", storyID, turn.BranchID, turn.ID, loadErr)
+				} else {
+					persistedSnapshot = &loaded
+				}
+			}
+			committedTurns := len(storyCtx.Snapshot.Turns) + 1
+			planStatus := ""
+			if storyCtx.Snapshot.DirectorPlanStatus != nil {
+				planStatus = storyCtx.Snapshot.DirectorPlanStatus.Status
+			}
+			if persistedSnapshot != nil {
+				committedTurns = len(persistedSnapshot.Turns)
+				if persistedSnapshot.DirectorPlanStatus != nil {
+					planStatus = persistedSnapshot.DirectorPlanStatus.Status
+				}
+			}
+			materialUpdate := turn.TurnResult != nil && turn.TurnResult.DirectorUpdate != nil && turn.TurnResult.DirectorUpdate.Needed
+			decision := interactive.DecideDirectorRunAfterTurn(director.Strategy.Enabled, policy, interactive.DirectorRunScheduleContext{
+				CommittedTurns: committedTurns,
+				PlanStatus:     planStatus,
+				MaterialUpdate: materialUpdate,
+			})
+			log.Printf("[interactive-director-agent] maintenance decision story_id=%s branch_id=%s turn_id=%s policy_mode=%s interval_turns=%d committed_turns=%d plan_status=%s run_plan=%t reason=%s", storyID, turn.BranchID, turn.ID, policy.Mode, policy.IntervalTurns, committedTurns, planStatus, decision.ShouldRun, decision.Reason)
 			startInteractiveDirectorMaintenanceTask(&runtimeCfg, state, conversation, turn, sessionStore, decision.ShouldRun)
 			maintenanceScheduled = true
 		}
 		interactiveEmit := func(event agent.Event) {
 			if event.Type == "done" && !persistedEmitted && ctx.Err() == nil {
 				persistedEmitted = true
-				emitInteractiveTurnPersisted(store, storyID, conversation, emit)
+				persistedSnapshot := emitInteractiveTurnPersisted(store, storyID, conversation, emit)
 				if turn, _, ok := conversation.LastTurnForState(); ok {
-					scheduleMaintenance(turn)
+					scheduleMaintenance(turn, persistedSnapshot)
 				}
 			}
 			emit(event)
 		}
 		chatService.RunWithOptions(ctx, runner, conversation, bookService, req, agent.RunOptions{
-			AgentKind:           agent.AgentKindInteractiveStory,
-			TaskID:              task.ID(),
-			StoryID:             storyID,
-			BranchID:            conversation.branchID,
-			Workspace:           workspace,
-			Mode:                "interactive",
-			IdleTimeout:         agentIdleTimeout(runtimeCfg),
-			ToolResultMaxBytes:  agentToolResultMaxBytes(runtimeCfg),
-			SystemPromptLog:     agent.BuildInteractiveStoryInstructionComposition(&runtimeCfg, state, tellerSystemInput),
-			OnMutationsVerified: a.automationMutationCallback("interactive_agent_post_run"),
+			AgentKind:          agent.AgentKindInteractiveStory,
+			TaskID:             task.ID(),
+			StoryID:            storyID,
+			BranchID:           conversation.branchID,
+			Workspace:          workspace,
+			Mode:               "interactive",
+			IdleTimeout:        agentIdleTimeout(runtimeCfg),
+			ToolResultMaxBytes: agentToolResultMaxBytes(runtimeCfg),
+			SystemPromptLog:    agent.BuildInteractiveStoryInstructionComposition(&runtimeCfg, state, tellerSystemInput),
+			OnMutationsVerified: a.verifiedWorkspaceMutationCallback(
+				"interactive_agent_post_run",
+				versionService,
+				versionAutoSettingsForConfig(&runtimeCfg),
+			),
 		}, interactiveEmit)
 		if turn, _, ok := conversation.LastTurnForState(); ok && ctx.Err() == nil && !maintenanceScheduled {
-			scheduleMaintenance(turn)
+			scheduleMaintenance(turn, nil)
 		}
 		log.Printf("[interactive-agent-task] run end id=%s status=%s", task.ID(), task.Status())
 	})
@@ -889,18 +920,18 @@ func (s *InteractiveAppService) startInteractiveTask(ctx context.Context, storyI
 	return task
 }
 
-func emitInteractiveTurnPersisted(store *interactive.Store, storyID string, conversation *interactiveConversation, emit func(agent.Event)) {
+func emitInteractiveTurnPersisted(store *interactive.Store, storyID string, conversation *interactiveConversation, emit func(agent.Event)) *interactive.Snapshot {
 	if store == nil || conversation == nil || emit == nil {
-		return
+		return nil
 	}
 	turn, _, ok := conversation.LastTurnForState()
 	if !ok || strings.TrimSpace(turn.ID) == "" {
-		return
+		return nil
 	}
 	snapshot, err := store.Snapshot(storyID, turn.BranchID)
 	if err != nil {
 		log.Printf("[interactive-agent-task] load persisted turn snapshot failed story_id=%s branch_id=%s turn_id=%s err=%v", storyID, turn.BranchID, turn.ID, err)
-		return
+		return nil
 	}
 	persistedTurn := turn
 	for _, snapshotTurn := range snapshot.Turns {
@@ -922,6 +953,7 @@ func emitInteractiveTurnPersisted(store *interactive.Store, storyID string, conv
 	}
 	emit(agent.Event{Type: "interactive_turn_persisted", Data: event})
 	log.Printf("[interactive-agent-task] emitted persisted turn story_id=%s branch_id=%s turn_id=%s", storyID, snapshot.BranchID, persistedTurn.ID)
+	return &snapshot
 }
 
 func (a *App) InteractiveTellers() ([]interactive.Teller, error) {

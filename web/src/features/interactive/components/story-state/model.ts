@@ -1,6 +1,17 @@
-import type { ActorStateField, ActorStateSchemaSnapshot, ActorTraitInstance, Snapshot, TurnEvent } from '../../types'
+import type { ActorStateField, ActorStateSchemaSnapshot, ActorTraitInstance, Snapshot, StateOp, TurnEvent } from '../../types'
+import type { ClassifiedStateChange } from './changes'
+import { mergeFieldChanges } from './changes'
+import { resolveStateFieldLayout, type StateFieldRenderer } from './field-layout'
 
 export type ActorStateEntry = [string, Record<string, unknown>]
+
+export interface ActorArchiveEntry {
+  actorId: string
+  name: string
+  templateId: string
+  reason: string
+  sourceTurnId: string
+}
 
 export interface StoryStateChange {
   id: string
@@ -13,6 +24,7 @@ export interface StoryStateChange {
 
 export interface StoryStateModel {
   actors: ActorStateEntry[]
+  archivedActors: ActorArchiveEntry[]
   worldFacts: Array<[string, unknown]>
   changes: StoryStateChange[]
   hasState: boolean
@@ -22,28 +34,51 @@ export function buildStoryStateModel(snapshot: Snapshot | null): StoryStateModel
   const stateFacts = snapshot
     ? Object.entries(snapshot.state).filter(([, value]) => value !== undefined && value !== null)
     : []
-  const { actors, worldFacts } = splitStoryStateFacts(stateFacts)
+  const { actors, archivedActors, worldFacts } = splitStoryStateFacts(stateFacts)
   return {
     actors,
+    archivedActors,
     worldFacts,
     changes: stateChanges(snapshot?.current_turn?.state_delta),
-    hasState: actors.length > 0 || worldFacts.length > 0,
+    hasState: actors.length > 0 || archivedActors.length > 0 || worldFacts.length > 0,
   }
 }
 
 export function splitStoryStateFacts(stateFacts: Array<[string, unknown]>) {
   const stateObjects = actorEntries(stateFacts)
-  const actors = stateObjects.filter(([actorId, actor]) => isActorLike(actorId, actor))
-  const otherFacts = stateFacts.filter(([key]) => key !== 'actors')
+  const archivedActors = actorArchiveEntries(stateFacts, stateObjects)
+  const archivedIds = new Set(archivedActors.map((entry) => entry.actorId))
+  const activeStateObjects = stateObjects.filter(([actorId]) => !archivedIds.has(actorId))
+  const actors = activeStateObjects.filter(([actorId, actor]) => isActorLike(actorId, actor))
+  const otherFacts = stateFacts.filter(([key]) => key !== 'actors' && key !== 'actor_archives')
   const worldFacts = ([
     ...otherFacts,
-    ...stateObjects
+    ...activeStateObjects
       .filter(([actorId, actor]) => !isActorLike(actorId, actor))
       .map(([actorId, actor]): [string, unknown] => [actorName(actorId, actor), stateObjectValue(actor)]),
   ] satisfies Array<[string, unknown]>)
     .map(([key, value]): [string, unknown] => [key, compactStateValue(value)])
     .filter(([, value]) => value !== undefined)
-  return { actors, worldFacts, stateObjects, otherFacts }
+  return { actors, archivedActors, worldFacts, stateObjects, otherFacts }
+}
+
+export function actorArchiveEntries(stateFacts: Array<[string, unknown]>, actors = actorEntries(stateFacts)): ActorArchiveEntry[] {
+  const archives = stateFacts.find(([key]) => key === 'actor_archives')?.[1]
+  if (!isRecord(archives)) return []
+  const actorsById = new Map(actors)
+  return Object.entries(archives)
+    .map(([actorId, rawArchive]) => {
+      const actor = actorsById.get(actorId) || {}
+      const archive = isRecord(rawArchive) ? rawArchive : {}
+      return {
+        actorId,
+        name: actorName(actorId, actor),
+        templateId: stringValue(actor.template_id),
+        reason: stringValue(archive.reason),
+        sourceTurnId: stringValue(archive.source_turn_id),
+      }
+    })
+    .sort((left, right) => left.name.localeCompare(right.name))
 }
 
 export function actorEntries(stateFacts: Array<[string, unknown]>): ActorStateEntry[] {
@@ -63,9 +98,9 @@ export function actorTemplate(actor: Record<string, unknown>, schema?: ActorStat
   return schema?.system.templates?.find((item) => item.id === templateId)
 }
 
-export function visibleActorTraits(actor: Record<string, unknown>) {
+export function actorTraits(actor: Record<string, unknown>) {
   if (!Array.isArray(actor.traits)) return []
-  return actor.traits.filter(isActorTrait).filter((trait) => trait.visibility !== 'hidden')
+  return actor.traits.filter(isActorTrait)
 }
 
 export function actorFieldEntries(
@@ -73,20 +108,16 @@ export function actorFieldEntries(
   schemaFields: ActorStateField[] | undefined,
 ): Array<{ field: ActorStateField; value: unknown }> {
   const state = isRecord(actor.state) ? actor.state : {}
-  const visibleFields = (schemaFields || [])
-    .filter((field) => field.visibility !== 'hidden')
-    .slice()
-    .sort((left, right) => (left.order || 0) - (right.order || 0) || left.name.localeCompare(right.name))
   if (schemaFields !== undefined) {
-    return visibleFields.map((field) => ({
+    return schemaFields.map((field) => ({
       field,
       value: state[field.name] ?? (field.id ? state[field.id] : undefined) ?? (field.path ? state[field.path] : undefined),
     }))
   }
 
   const directState = Object.fromEntries(Object.entries(actor).filter(([key]) => !['name', 'role', 'template_id', 'state', 'traits'].includes(key)))
-  return Object.entries({ ...directState, ...state }).map(([name, value], index) => ({
-    field: { name: humanizeStateKey(name), type: inferredFieldType(value), order: index * 10 } satisfies ActorStateField,
+  return Object.entries({ ...directState, ...state }).map(([name, value]) => ({
+    field: { name: humanizeStateKey(name), type: inferredFieldType(value) } satisfies ActorStateField,
     value,
   }))
 }
@@ -101,13 +132,25 @@ export function stateChanges(delta: TurnEvent['state_delta']): StoryStateChange[
     value: op.value,
     reason: op.reason,
   }))
-  const sharedChanges: StoryStateChange[] = (delta.ops || []).map((op, index) => ({
-    id: `state:${op.path}:${index}`,
-    path: op.path,
-    op: op.op,
-    value: op.value,
-    reason: op.reason,
-  }))
+  const sharedChanges: StoryStateChange[] = (delta.ops || []).map((op, index) => {
+    const lifecycle = actorLifecycleChange(op)
+    if (lifecycle) {
+      return {
+        id: `actor-lifecycle:${lifecycle.actorId}:${lifecycle.op}:${index}`,
+        actorId: lifecycle.actorId,
+        path: '',
+        op: lifecycle.op,
+        reason: lifecycle.reason,
+      }
+    }
+    return {
+      id: `state:${op.path}:${index}`,
+      path: op.path,
+      op: op.op,
+      value: op.value,
+      reason: op.reason,
+    }
+  })
   return [...actorChanges, ...sharedChanges]
 }
 
@@ -176,6 +219,121 @@ function isActorTrait(value: unknown): value is ActorTraitInstance {
     && typeof value.pool_id === 'string'
     && typeof value.trait_id === 'string'
     && typeof value.name === 'string'
+}
+
+// --- Ledger field grouping -------------------------------------------------
+
+export interface LedgerFieldEntry {
+  id: string
+  label: string
+  field?: ActorStateField
+  value: unknown
+}
+
+export interface LedgerFieldItem extends LedgerFieldEntry {
+  renderer: StateFieldRenderer
+  change: ClassifiedStateChange | null
+}
+
+export interface LedgerFieldGroup {
+  /** Builtin group key or the template-declared group name. */
+  key: string
+  custom: boolean
+  fields: LedgerFieldItem[]
+}
+
+/**
+ * buildLedgerGroups resolves each field's renderer + group (template hints
+ * first, shape heuristics as fallback) and attaches the classified turn
+ * change. The schema's field array is the fallback order; any user ordering
+ * is applied later as a UI-only preference.
+ */
+export function buildLedgerGroups(entries: LedgerFieldEntry[], changes: StoryStateChange[]): LedgerFieldGroup[] {
+  const groups: LedgerFieldGroup[] = []
+  const byKey = new Map<string, LedgerFieldGroup>()
+  for (const entry of entries) {
+    const layout = resolveStateFieldLayout(entry.field, entry.value)
+    let group = byKey.get(layout.group)
+    if (!group) {
+      group = { key: layout.group, custom: layout.customGroup, fields: [] }
+      byKey.set(layout.group, group)
+      groups.push(group)
+    }
+    const fieldChanges = matchFieldChanges(changes, entry)
+    group.fields.push({
+      ...entry,
+      renderer: layout.renderer,
+      change: mergeFieldChanges(fieldChanges, typeof entry.value === 'number'),
+    })
+  }
+  return groups.sort((left, right) => (
+    ledgerGroupPriority(left) - ledgerGroupPriority(right)
+  ))
+}
+
+const BUILTIN_GROUP_PRIORITY: Record<string, number> = {
+  overview: 0,
+  holdings: 1,
+  details: 3,
+}
+
+/** Custom groups sit between holdings and details and keep first-seen field order. */
+function ledgerGroupPriority(group: LedgerFieldGroup) {
+  if (group.custom) return 2
+  return BUILTIN_GROUP_PRIORITY[group.key] ?? 2
+}
+
+/** Splits the current ordered layout into its first two preview groups and the remainder. */
+export function splitLedgerGroupsForPreview(groups: LedgerFieldGroup[]): { preview: LedgerFieldGroup[]; hidden: LedgerFieldGroup[] } {
+  return { preview: groups.slice(0, 2), hidden: groups.slice(2) }
+}
+
+function matchFieldChanges(changes: StoryStateChange[], entry: LedgerFieldEntry) {
+  const candidates = entry.field ? actorFieldPaths(entry.field) : [entry.id]
+  return changes.filter((change) => candidates.some((path) => sameFieldPath(change.path, path) || change.path.startsWith(`${path}.`)))
+}
+
+export function actorFieldPaths(field: ActorStateField) {
+  return [field.id, field.path, field.name]
+    .filter((value): value is string => typeof value === 'string' && value.trim() !== '')
+}
+
+export function sameFieldPath(left: string, right: string) {
+  const normalizedLeft = humanizeStateKey(left.trim()).toLocaleLowerCase()
+  const normalizedRight = humanizeStateKey(right.trim()).toLocaleLowerCase()
+  return normalizedLeft === normalizedRight
+}
+
+/**
+ * changeFieldLabel resolves a change to its template field name so the
+ * summary row shows localized names instead of raw field ids.
+ */
+export function changeFieldLabel(change: StoryStateChange, actors: ActorStateEntry[], schema?: ActorStateSchemaSnapshot): string {
+  if (change.actorId) {
+    const actor = actors.find(([actorId]) => actorId === change.actorId)?.[1]
+    if (change.op === 'archive' || change.op === 'restore') return actor ? actorName(change.actorId, actor) : change.actorId
+    const template = actor ? actorTemplate(actor, schema) : undefined
+    const field = template?.fields?.find((candidate) => actorFieldPaths(candidate).some((path) => sameFieldPath(path, change.path)))
+    if (field) return field.name
+    return humanizeStateKey(change.path)
+  }
+  const segments = change.path.split('.').filter(Boolean)
+  return humanizeStateKey(segments[segments.length - 1] || change.path)
+}
+
+function actorLifecycleChange(op: StateOp) {
+  const prefix = 'actor_archives.'
+  if (!op.path.startsWith(prefix)) return null
+  const actorId = op.path.slice(prefix.length).trim()
+  if (!actorId) return null
+  const normalizedOp = op.op.trim().toLowerCase()
+  if (normalizedOp !== 'set' && normalizedOp !== 'unset') return null
+  const archive = isRecord(op.value) ? op.value : {}
+  return {
+    actorId,
+    op: normalizedOp === 'set' ? 'archive' : 'restore',
+    reason: stringValue(op.reason) || stringValue(archive.reason),
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

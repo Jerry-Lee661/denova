@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
-import { Bot, Brain, Check, ChevronDown, ChevronRight, Edit3, FolderOpen, Loader2, Plus, Save, ScrollText, Trash2, Wrench } from 'lucide-react'
+import { Bot, Brain, Check, ChevronDown, ChevronRight, Edit3, FolderOpen, Plus, ScrollText, Trash2, Wrench } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { ConfigManagerChat } from '@/components/Chat/ConfigManagerChat'
+import { AutosaveStatusIndicator } from '@/components/forms/autosave-status'
 import { FormField } from '@/components/forms/form-field'
 import { FormSectionHeader } from '@/components/forms/form-section-header'
 import { AdaptiveSurface } from '@/components/layout/adaptive-surface'
@@ -30,7 +31,7 @@ const tabCls = 'nova-nav-item rounded-[var(--nova-radius)] px-2.5 py-1 text-xs'
 export function AgentsView({ onClose }: { onClose?: () => void }) {
   const { t } = useTranslation()
   const [activeLayer, setActiveLayer] = useState<SettingsLayer>('user')
-  const { layered, draft, setDraft, saving, error, reload, notifyUpdated, saveNow } = useLayeredSettingsDraft({
+  const { layered, draft, setDraft, error, autosaveStatus, autosaveError, reload, notifyUpdated, saveNow } = useLayeredSettingsDraft({
     layer: activeLayer,
     sourcePrefix: 'agents-view',
   })
@@ -85,16 +86,24 @@ export function AgentsView({ onClose }: { onClose?: () => void }) {
     write_scope_hint: activeLayer,
   }), [activeAgent, activeLayer, selected.titleKey, t])
 
-  const onSave = async () => {
+  const reloadAfterAgentMutation = useCallback(() => {
+    void saveNow()
+      .then(async () => {
+        await reload()
+        notifyUpdated()
+      })
+      .catch(() => undefined)
+  }, [notifyUpdated, reload, saveNow])
+
+  const switchLayer = async (layer: SettingsLayer) => {
+    if (layer === activeLayer) return
     try {
       await saveNow()
-    } catch { /* useLayeredSettingsDraft exposes the page error state. */ }
+      setActiveLayer(layer)
+    } catch {
+      // The layered settings hook already exposes the actionable save error.
+    }
   }
-
-  const reloadAfterAgentMutation = useCallback(() => {
-    void reload()
-    notifyUpdated()
-  }, [notifyUpdated, reload])
 
   const setAgentModel = (patch: Partial<AgentModelOverride>) => {
     setDraft((current) => ({
@@ -174,8 +183,11 @@ export function AgentsView({ onClose }: { onClose?: () => void }) {
       topbarClassName="max-md:flex-wrap max-md:overflow-x-hidden"
       error={error}
       errorTitle={t('agents.saveError')}
-      onClose={onClose}
+      onClose={onClose ? () => {
+        void saveNow().then(() => onClose()).catch(() => undefined)
+      } : undefined}
       closeLabel={t('agents.close')}
+      onSaveShortcut={() => saveNow().catch(() => undefined)}
       headerContent={(
         <div className="flex shrink-0 gap-1 border-l border-[var(--nova-border)] pl-2 sm:ml-3 sm:pl-3">
           {(['user', 'workspace'] as SettingsLayer[]).map((layer) => (
@@ -184,7 +196,7 @@ export function AgentsView({ onClose }: { onClose?: () => void }) {
               type="button"
               variant="ghost"
               size="xs"
-              onClick={() => setActiveLayer(layer)}
+              onClick={() => void switchLayer(layer)}
               className={`${tabCls} ${activeLayer === layer ? 'is-active' : 'bg-[var(--nova-surface-2)] text-[var(--nova-text-muted)]'}`}
             >
               {layer === 'workspace' ? t('agents.layer.workspace') : t('agents.layer.user')}
@@ -194,10 +206,11 @@ export function AgentsView({ onClose }: { onClose?: () => void }) {
       )}
       actions={(
         <>
-          <Button type="button" onClick={onSave} disabled={saving} variant="secondary" size="sm">
-            {saving ? <Loader2 className="animate-spin" data-icon="inline-start" /> : <Save data-icon="inline-start" />}
-            {t('common.save')}
-          </Button>
+          <AutosaveStatusIndicator
+            status={autosaveStatus}
+            error={autosaveError}
+            onRetry={() => saveNow().catch(() => undefined)}
+          />
           <Button
             type="button"
             onClick={() => setAgentChatOpen((value) => !value)}
@@ -218,7 +231,7 @@ export function AgentsView({ onClose }: { onClose?: () => void }) {
           side: 'left',
           icon: <Bot className="h-4 w-4" />,
           content: <div className="h-full min-h-0 overflow-y-auto bg-[var(--nova-surface-2)] p-3"><AgentList active={activeAgent} onSelect={setActiveAgent} /></div>,
-          desktopClassName: 'min-h-0 border-r border-[var(--nova-border)]',
+          desktopClassName: 'w-72 shrink-0 min-h-0 border-r border-[var(--nova-border)]',
           mobileClassName: 'w-[min(88vw,340px)]',
         }}
         right={agentChatOpen ? {
@@ -243,6 +256,14 @@ export function AgentsView({ onClose }: { onClose?: () => void }) {
         className="flex-1 text-xs"
         mainClassName="min-h-0 min-w-0"
         desktopGridClassName={agentChatOpen ? 'grid-cols-[18rem_minmax(0,1fr)_minmax(320px,28rem)]' : 'grid-cols-[18rem_minmax(0,1fr)]'}
+        rightResize={{
+          layoutKey: 'nova-agents-config-manager-layout',
+          label: t('layout.resize.right'),
+          defaultSize: '420px',
+          minSize: '300px',
+          maxSize: '65%',
+          mainMinSize: '240px',
+        }}
       >
         {({ openLeft, openRight }) => (
           <main className="h-full min-h-0 overflow-y-auto overflow-x-hidden">
@@ -583,18 +604,12 @@ function AgentRuntimeContextSection({ agent, value, inherited, onChange }: {
   const hasCompactionTargetMin = value.compaction_target_min_ratio !== undefined && value.compaction_target_min_ratio !== null
   const hasCompactionTargetMax = value.compaction_target_max_ratio !== undefined && value.compaction_target_max_ratio !== null
   const hasToolResultRetention = value.tool_result_retention_enabled !== undefined && value.tool_result_retention_enabled !== null
-  const hasToolResultKeepRecent = value.tool_result_keep_recent !== undefined && value.tool_result_keep_recent !== null
-  const hasToolResultBudget = value.tool_result_context_budget_kb !== undefined && value.tool_result_context_budget_kb !== null
-  const hasToolResultPreview = value.tool_result_preview_chars !== undefined && value.tool_result_preview_chars !== null
   const effectiveCompactionEnabled = hasCompactionEnabled ? value.compaction_enabled : inherited.compaction_enabled ?? true
   const effectiveCompactionThreshold = hasCompactionThreshold ? value.compaction_threshold : inherited.compaction_threshold ?? 0.9
   const effectiveCompactionRecentTurns = hasCompactionRecentTurns ? value.compaction_recent_turns : inherited.compaction_recent_turns ?? 1
   const effectiveCompactionTargetMin = hasCompactionTargetMin ? value.compaction_target_min_ratio : inherited.compaction_target_min_ratio ?? 0.05
   const effectiveCompactionTargetMax = hasCompactionTargetMax ? value.compaction_target_max_ratio : inherited.compaction_target_max_ratio ?? 0.2
   const effectiveToolResultRetention = hasToolResultRetention ? value.tool_result_retention_enabled : inherited.tool_result_retention_enabled ?? (agent === 'ide' || agent === 'interactive_story')
-  const effectiveToolResultKeepRecent = hasToolResultKeepRecent ? value.tool_result_keep_recent : inherited.tool_result_keep_recent ?? 3
-  const effectiveToolResultBudget = hasToolResultBudget ? value.tool_result_context_budget_kb : inherited.tool_result_context_budget_kb ?? 200
-  const effectiveToolResultPreview = hasToolResultPreview ? value.tool_result_preview_chars : inherited.tool_result_preview_chars ?? 2000
   const isCompactionAgent = agent === 'context_compaction'
   return (
     <section className="flex flex-col gap-3 border-b border-[var(--nova-border)] pb-5">
@@ -630,42 +645,6 @@ function AgentRuntimeContextSection({ agent, value, inherited, onChange }: {
                 ariaLabel={t('agents.field.toolResultRetention')}
                 inherited={!hasToolResultRetention}
                 onReset={hasToolResultRetention ? () => onChange({ tool_result_retention_enabled: null }) : undefined}
-              />
-            </Field>
-            <Field label={t('agents.field.toolResultKeepRecent')} inherited={!hasToolResultKeepRecent} onReset={hasToolResultKeepRecent ? () => onChange({ tool_result_keep_recent: null }) : undefined}>
-              <Input
-                type="number"
-                aria-label={t('agents.field.toolResultKeepRecent')}
-                min={1}
-                max={20}
-                step={1}
-                value={effectiveToolResultKeepRecent ?? 3}
-                onChange={(e) => onChange({ tool_result_keep_recent: e.target.value === '' ? null : Number(e.target.value) })}
-                className="h-7 flex-1 text-xs"
-              />
-            </Field>
-            <Field label={t('agents.field.toolResultBudget')} inherited={!hasToolResultBudget} onReset={hasToolResultBudget ? () => onChange({ tool_result_context_budget_kb: null }) : undefined}>
-              <Input
-                type="number"
-                aria-label={t('agents.field.toolResultBudget')}
-                min={1}
-                max={4096}
-                step={1}
-                value={effectiveToolResultBudget ?? 200}
-                onChange={(e) => onChange({ tool_result_context_budget_kb: e.target.value === '' ? null : Number(e.target.value) })}
-                className="h-7 flex-1 text-xs"
-              />
-            </Field>
-            <Field label={t('agents.field.toolResultPreview')} inherited={!hasToolResultPreview} onReset={hasToolResultPreview ? () => onChange({ tool_result_preview_chars: null }) : undefined}>
-              <Input
-                type="number"
-                aria-label={t('agents.field.toolResultPreview')}
-                min={1}
-                max={20000}
-                step={100}
-                value={effectiveToolResultPreview ?? 2000}
-                onChange={(e) => onChange({ tool_result_preview_chars: e.target.value === '' ? null : Number(e.target.value) })}
-                className="h-7 flex-1 text-xs"
               />
             </Field>
           </>
@@ -1563,9 +1542,6 @@ function mergeAgentContextOverride(parent: AgentContextOverride, child: AgentCon
   const compactionRecentTurns = child.compaction_recent_turns ?? parent.compaction_recent_turns ?? 1
   const compactionTargetMin = child.compaction_target_min_ratio ?? parent.compaction_target_min_ratio ?? 0.05
   const compactionTargetMax = child.compaction_target_max_ratio ?? parent.compaction_target_max_ratio ?? 0.2
-  const toolResultKeepRecent = child.tool_result_keep_recent ?? parent.tool_result_keep_recent ?? 3
-  const toolResultBudget = child.tool_result_context_budget_kb ?? parent.tool_result_context_budget_kb ?? 200
-  const toolResultPreview = child.tool_result_preview_chars ?? parent.tool_result_preview_chars ?? 2000
   return {
     compaction_enabled: child.compaction_enabled ?? parent.compaction_enabled ?? true,
     compaction_strategy: child.compaction_strategy || parent.compaction_strategy || 'summary_agent',
@@ -1574,8 +1550,5 @@ function mergeAgentContextOverride(parent: AgentContextOverride, child: AgentCon
     compaction_target_min_ratio: Math.max(0.01, Math.min(0.8, compactionTargetMin)),
     compaction_target_max_ratio: Math.max(0.01, Math.min(0.8, Math.max(compactionTargetMin, compactionTargetMax))),
     tool_result_retention_enabled: child.tool_result_retention_enabled ?? parent.tool_result_retention_enabled,
-    tool_result_keep_recent: Math.max(1, Math.min(20, toolResultKeepRecent)),
-    tool_result_context_budget_kb: Math.max(1, Math.min(4096, toolResultBudget)),
-    tool_result_preview_chars: Math.max(1, Math.min(20000, toolResultPreview)),
   }
 }

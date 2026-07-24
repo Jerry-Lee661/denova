@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 
 	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
@@ -25,11 +26,14 @@ type StoryDirectorActorStateSystem struct {
 }
 
 type ActorStateTemplate struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Description string            `json:"description,omitempty"`
-	Fields      []ActorStateField `json:"fields,omitempty"`
+	ID          string            `json:"id" jsonschema_description:"稳定的 ASCII Template ID。"`
+	Name        string            `json:"name" jsonschema_description:"用户可见模板名称。"`
+	Description string            `json:"description,omitempty" jsonschema_description:"模板职责的简短说明。"`
+	Fields      []ActorStateField `json:"fields,omitempty" jsonschema:"maxItems=64" jsonschema_description:"模板字段；只添加确有长期追踪价值的字段。"`
 	TraitRules  []ActorTraitRule  `json:"trait_rules,omitempty"`
+	// DisplayGroups is retained only for decoding older Beta presets. The stage
+	// ignores it and stores user layout by story + template outside the schema.
+	DisplayGroups []string `json:"display_groups,omitempty"`
 }
 
 // ActorTraitRule declares which reusable trait pool is available to actors
@@ -49,11 +53,10 @@ type ActorTraitPool struct {
 }
 
 type ActorTraitDefinition struct {
-	ID         string  `json:"id"`
-	Name       string  `json:"name"`
-	Summary    string  `json:"summary,omitempty"`
-	Weight     float64 `json:"weight,omitempty"`
-	Visibility string  `json:"visibility,omitempty"`
+	ID      string  `json:"id"`
+	Name    string  `json:"name"`
+	Summary string  `json:"summary,omitempty"`
+	Weight  float64 `json:"weight,omitempty"`
 }
 
 // ActorTraitInstance is a snapshot of a definition at assignment time. Stories
@@ -64,7 +67,6 @@ type ActorTraitInstance struct {
 	TraitID      string `json:"trait_id"`
 	Name         string `json:"name"`
 	Summary      string `json:"summary,omitempty"`
-	Visibility   string `json:"visibility,omitempty"`
 	SourceKind   string `json:"source_kind,omitempty"`
 	SourceID     string `json:"source_id,omitempty"`
 	SourceTurnID string `json:"source_turn_id,omitempty"`
@@ -84,16 +86,23 @@ type ActorStateField struct {
 	ID                string   `json:"-"`
 	Path              string   `json:"-"`
 	LegacyPath        string   `json:"-"`
-	Name              string   `json:"name"`
-	Type              string   `json:"type"`
+	Name              string   `json:"name" jsonschema_description:"稳定 Field ID 与用户可见名称；同一模板内唯一。"`
+	Type              string   `json:"type" jsonschema:"enum=number,enum=string,enum=bool,enum=enum,enum=object,enum=list" jsonschema_description:"字段值类型，只能使用列出的六种类型。"`
 	Default           any      `json:"default,omitempty"`
 	Min               *float64 `json:"min,omitempty"`
 	Max               *float64 `json:"max,omitempty"`
-	Options           []string `json:"options,omitempty"`
-	Visibility        string   `json:"visibility,omitempty"`
-	Description       string   `json:"description,omitempty"`
-	UpdateInstruction string   `json:"update_instruction,omitempty"`
-	Order             int      `json:"order,omitempty"`
+	Options           []string `json:"options,omitempty" jsonschema:"maxItems=24" jsonschema_description:"type=enum 时的有限合法值。"`
+	Description       string   `json:"description,omitempty" jsonschema_description:"字段承接的信息及语义。"`
+	UpdateInstruction string   `json:"update_instruction,omitempty" jsonschema_description:"何时更新以及写入完整值还是增量。"`
+	// Order is retained only for decoding older Beta presets. Field array order
+	// is the fallback; final layout belongs to the user's stage preference.
+	Order int `json:"order,omitempty"`
+	// Group and Display are optional presentation hints for the stage state
+	// ledger. Group clusters fields under one named ledger section; Display
+	// pins the field renderer (stat/inline/block/list). Both fall back to
+	// shape-based heuristics when empty and never affect state updates.
+	Group   string `json:"group,omitempty"`
+	Display string `json:"display,omitempty" jsonschema:"enum=stat,enum=inline,enum=block,enum=list" jsonschema_description:"可选展示提示；省略时由值形状推断。"`
 }
 
 const ActorStateSchemaVersion = 3
@@ -262,6 +271,7 @@ func normalizeActorStateTemplates(templates []ActorStateTemplate) []ActorStateTe
 		template.Description = trimBytes(template.Description, maxInteractiveTextBytes)
 		template.Fields = normalizeActorStateFields(template.Fields)
 		template.TraitRules = normalizeActorTraitRules(template.TraitRules)
+		template.DisplayGroups = nil
 		out = append(out, template)
 	}
 	return out
@@ -275,7 +285,7 @@ func normalizeActorStateFields(fields []ActorStateField) []ActorStateField {
 		fields = fields[:maxActorStateFields]
 	}
 	out := make([]ActorStateField, 0, len(fields))
-	for i, field := range fields {
+	for _, field := range fields {
 		field.LegacyPath = strings.TrimSpace(firstNonEmptyString(field.LegacyPath, field.Path))
 		field.Path = field.LegacyPath
 		field.Name = normalizeActorStateFieldName(firstNonEmptyString(field.Name, field.ID, field.LegacyPath))
@@ -284,21 +294,14 @@ func normalizeActorStateFields(fields []ActorStateField) []ActorStateField {
 		}
 		field.ID = field.Name
 		field.Type = normalizeActorStateFieldType(field.Type)
-		field.Visibility = normalizeStoryDirectorVisibility(field.Visibility)
 		field.Description = trimBytes(field.Description, maxInteractiveTextBytes)
 		field.UpdateInstruction = trimBytes(field.UpdateInstruction, maxInteractiveTextBytes)
 		field.Options = normalizeStringListLimit(field.Options, maxInteractiveListItems)
-		if field.Order == 0 {
-			field.Order = (i + 1) * 10
-		}
+		field.Group = trimBytes(field.Group, 64)
+		field.Display = normalizeActorStateFieldDisplay(field.Display)
+		field.Order = 0
 		out = append(out, field)
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Order != out[j].Order {
-			return out[i].Order < out[j].Order
-		}
-		return out[i].Name < out[j].Name
-	})
 	return out
 }
 
@@ -316,7 +319,7 @@ func normalizeActorStateInitialActors(actors []ActorStateInitialActor, templates
 	out := make([]ActorStateInitialActor, 0, len(actors))
 	seen := map[string]bool{}
 	for _, actor := range actors {
-		actor.ID = normalizeActorStateID(actor.ID)
+		actor.ID = normalizeStatePanelActorID(actor.ID)
 		if actor.ID == "" || seen[actor.ID] {
 			continue
 		}
@@ -341,6 +344,17 @@ func normalizeActorStateFieldType(value string) string {
 		return strings.TrimSpace(value)
 	default:
 		return "string"
+	}
+}
+
+// normalizeActorStateFieldDisplay keeps only the renderer hints the stage
+// state ledger understands; anything else falls back to heuristics.
+func normalizeActorStateFieldDisplay(value string) string {
+	switch strings.TrimSpace(value) {
+	case "stat", "inline", "block", "list":
+		return strings.TrimSpace(value)
+	default:
+		return ""
 	}
 }
 
@@ -399,7 +413,7 @@ func actorStateFieldByID(template ActorStateTemplate, fieldID string) (ActorStat
 }
 
 func actorStateFieldValue(state map[string]any, actorID, fieldID string) any {
-	actor, _ := getPath(state, actorStateRoot+"."+normalizeActorStateID(actorID)).(map[string]any)
+	actor, _ := getPath(state, actorStateRoot+"."+normalizeStatePanelActorID(actorID)).(map[string]any)
 	if actor == nil {
 		return nil
 	}
@@ -545,10 +559,9 @@ func enrichLegacyActorStateSchema(snapshot *ActorStateSchemaSnapshot, state map[
 			}
 			order := (len(template.Fields) + 1) * 10
 			template.Fields = append(template.Fields, ActorStateField{
-				Name:       legacyPath,
-				Type:       legacyActorStateFieldType(value),
-				Visibility: "visible",
-				Order:      order,
+				Name:  legacyPath,
+				Type:  legacyActorStateFieldType(value),
+				Order: order,
 			})
 			aliases[legacyPath] = legacyPath
 		}
@@ -691,19 +704,11 @@ func actorStateEmpty(system StoryDirectorActorStateSystem) bool {
 }
 
 func defaultActorStateSystem() StoryDirectorActorStateSystem {
-	return normalizeActorStateSystem(StoryDirectorActorStateSystem{
-		Templates: []ActorStateTemplate{
-			actorStateTemplate(DefaultActorID, "默认主角状态表", "记录主角当前可行动、可检定、可结算的通用互动状态；用户可按作品需要新增世界、故事倒计时、特定角色、势力、基地、副本等自定义状态表。", commonProtagonistStateFields()),
-			defaultStoryContextTemplate(),
-			actorStateTemplate(ActorStateImportantCharacterTemplateID, "默认重要角色状态表", "记录反复登场且会影响互动承接的重要角色状态；特定角色线可以另建独立状态表。", commonImportantCharacterStateFields()),
-			actorStateTemplate(ActorStateOpponentTemplateID, "默认敌人/怪物状态表", "记录敌人、怪物、反派、Boss 或异常实体的当前对抗状态；危机、势力或副本也可另建状态表。", commonOpponentStateFields()),
-		},
-		InitialActors: defaultActorStateInitialActors(),
-	})
+	return actorStateSystemForPreset(defaultActorStatePresetSpec())
 }
 
 func actorStateActorPath(actorID, field string) string {
-	return actorStateRoot + "." + normalizeActorStateID(actorID) + "." + strings.TrimSpace(field)
+	return actorStateRoot + "." + normalizeStatePanelActorID(actorID) + "." + strings.TrimSpace(field)
 }
 
 func actorStateFieldPath(actorID, fieldPath string) string {
@@ -719,6 +724,18 @@ func normalizeActorStateID(id string) string {
 		}
 	}
 	return sb.String()
+}
+
+func normalizeStatePanelActorID(id string) string {
+	id = strings.TrimSpace(norm.NFKC.String(id))
+	var sb strings.Builder
+	for _, r := range id {
+		if unicode.IsControl(r) || r == '.' {
+			continue
+		}
+		sb.WriteRune(r)
+	}
+	return strings.TrimSpace(sb.String())
 }
 
 func canonicalStatePath(path string) string {
@@ -758,7 +775,7 @@ func actorStateTemplateByID(system StoryDirectorActorStateSystem, id string) Act
 
 func validateActorStatePatch(system StoryDirectorActorStateSystem, currentState map[string]any, patch ActorStatePatch) (ActorStatePatch, []StateOp, []ActorStateOp, bool, []ActorTraitInstance, error) {
 	system = normalizeActorStateSystem(system)
-	patch.ActorID = normalizeActorStateID(patch.ActorID)
+	patch.ActorID = normalizeStatePanelActorID(patch.ActorID)
 	if patch.ActorID == "" {
 		return patch, nil, nil, false, nil, fmt.Errorf("Actor 状态更新缺少 actor_id")
 	}

@@ -85,7 +85,6 @@ func normalizeActorTraitDefinitions(traits []ActorTraitDefinition) []ActorTraitD
 		if trait.Weight <= 0 {
 			trait.Weight = 1
 		}
-		trait.Visibility = normalizeStoryDirectorVisibility(trait.Visibility)
 		out = append(out, trait)
 	}
 	return out
@@ -154,7 +153,7 @@ func rollActorTraits(system StoryDirectorActorStateSystem, req ActorTraitRollReq
 	if err := validateActorTraitSystem(system); err != nil {
 		return ActorTraitRollResult{}, err
 	}
-	req.ActorID = normalizeActorStateID(req.ActorID)
+	req.ActorID = normalizeStatePanelActorID(req.ActorID)
 	req.TemplateID = normalizeActorStateID(req.TemplateID)
 	if req.ActorID == "" {
 		return ActorTraitRollResult{}, fmt.Errorf("词条抽取缺少 actor_id")
@@ -200,7 +199,6 @@ func rollActorTraits(system StoryDirectorActorStateSystem, req ActorTraitRollReq
 				TraitID:      trait.ID,
 				Name:         trait.Name,
 				Summary:      trait.Summary,
-				Visibility:   trait.Visibility,
 				SourceKind:   sourceKind,
 				SourceID:     sourceID,
 				SourceTurnID: sourceTurnID,
@@ -314,7 +312,7 @@ func BuildActorStateInitialChanges(system StoryDirectorActorStateSystem, rolls [
 	}
 	rollByActor := map[string]InitialActorTraitRoll{}
 	for _, roll := range rolls {
-		roll.ActorID = normalizeActorStateID(roll.ActorID)
+		roll.ActorID = normalizeStatePanelActorID(roll.ActorID)
 		if roll.ActorID == "" {
 			return nil, nil, fmt.Errorf("初始词条抽取缺少 actor_id")
 		}

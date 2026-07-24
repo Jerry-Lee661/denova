@@ -1,7 +1,12 @@
 import type { UIMessageChunk } from 'ai'
-import { fetchAPI, jsonHeaders, parseUIMessageStream, requestJSON } from './client'
+import { fetchAPI, jsonHeaders, parseUIMessageStream, readErrorMessage, requestJSON } from './client'
 import type { AgentRunTrace, AgentRunTraceSummary, ContextAnalysis, IDEContext, SessionSummary, TextSelection } from './types'
 import type { AgentUIMessage } from '@/lib/agent-ui'
+
+export interface AgentRunTraceExportFile {
+  filename: string
+  blob: Blob
+}
 
 export async function sendMessage(
   message: string,
@@ -122,6 +127,35 @@ export async function getMessages(sessionId?: string): Promise<AgentUIMessage[]>
   return requestJSON(`/api/session/messages${query}`)
 }
 
+export const DEFAULT_SESSION_MESSAGE_PAGE_SIZE = 100
+
+export interface SessionMessagesPage {
+  messages: AgentUIMessage[]
+  nextBefore: string
+  hasMore: boolean
+  total: number
+}
+
+export async function getMessagesPage(sessionId?: string, options: { limit?: number; before?: string } = {}): Promise<SessionMessagesPage> {
+  const query = new URLSearchParams()
+  if (sessionId) query.set('session_id', sessionId)
+  query.set('limit', String(options.limit || DEFAULT_SESSION_MESSAGE_PAGE_SIZE))
+  if (options.before) query.set('before', options.before)
+  const data = await requestJSON<AgentUIMessage[] | {
+    messages?: AgentUIMessage[]
+    page?: { next_before?: string; has_more?: boolean; total?: number }
+  }>(`/api/session/messages?${query.toString()}`)
+  if (Array.isArray(data)) {
+    return { messages: data, nextBefore: '0', hasMore: false, total: data.length }
+  }
+  return {
+    messages: data.messages || [],
+    nextBefore: data.page?.next_before || '0',
+    hasMore: data.page?.has_more === true,
+    total: data.page?.total || 0,
+  }
+}
+
 export async function getSessions(): Promise<SessionSummary[]> {
   const data = await requestJSON<{ sessions: SessionSummary[] }>('/api/sessions')
   return data.sessions || []
@@ -134,6 +168,26 @@ export async function getAgentRunTraces(limit = 20): Promise<AgentRunTraceSummar
 
 export async function getAgentRunTrace(id: string): Promise<AgentRunTrace> {
   return requestJSON(`/api/agent-runs/${encodeURIComponent(id)}`)
+}
+
+export async function exportAgentRunTrace(id: string): Promise<AgentRunTraceExportFile> {
+  const res = await fetchAPI(`/api/agent-runs/${encodeURIComponent(id)}/export`)
+  if (!res.ok) throw new Error(await readErrorMessage(res))
+  return {
+    filename: `${id}.jsonl`,
+    blob: await res.blob(),
+  }
+}
+
+export function downloadAgentRunTrace(file: AgentRunTraceExportFile) {
+  const href = URL.createObjectURL(file.blob)
+  const link = document.createElement('a')
+  link.href = href
+  link.download = file.filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(href)
 }
 
 export async function createSession(title?: string): Promise<SessionSummary> {

@@ -92,9 +92,8 @@ func outputProtocolForAgent(agentKind string) string {
 		}, "\n")
 	case config.AgentKindInteractiveDirector:
 		return strings.Join([]string{
-			"- 当前调用为 state_schema_initialization 时，只能使用资料库只读工具审阅必要设定，并通过 submit_state_schema_adaptation 增量暂存有来源的状态 schema Batch；只重试 rejected/blocked 项，finalize 成功后最终回复一句简短摘要。",
-			"- 当前调用为 director_plan_update 或 opening_plan 时，通过 submit_director_plan_update 增量提交带 base_hash 的 Markdown Patch；文件独立 accepted/rejected，只重试 retry_documents，finalize 成功前不写工作区。普通更新默认只改 agent-brief.md；keep 使用空 updates，replan 至少更新 director.md 与 agent-brief.md。",
-			"- 两个阶段都不得续写剧情或绕过各自工具直接写入 Actor State；state_schema_initialization 的 actor_ops 只是待后端原子迁移的 Batch 提案，finalize 前不生效。",
+			"- 通过 submit_director_plan_update 增量提交带 base_hash 的 Markdown Patch；文件独立 accepted/rejected，只重试 retry_documents，finalize 成功前不写工作区。普通更新默认只改 agent-brief.md；keep 使用空 updates，replan 至少更新 director.md 与 agent-brief.md。",
+			"- 不得续写剧情，也不得写入 Actor State 或调整状态结构；状态结构只由开局 Game Agent 按故事级策略初始化。",
 		}, "\n")
 	case config.AgentKindVersionSummary:
 		return "- 必须只输出一句中文版本说明，10 到 30 个汉字，不要编号、引号、冒号、句号或解释。"
@@ -122,6 +121,7 @@ func agentRuntimeContract(agentKind string) string {
 	case config.AgentKindInteractiveStory:
 		return strings.Join([]string{
 			"- 互动叙事 Agent 可以使用只读文件工具读取 system prompt 明确给出的共享文风参考；禁止修改 workspace 文件，禁止输出或调用写文件、删除文件、任务计划等工具。",
+			"- 当前工具列表提供 initialize_story_state_schema 时，说明这是动态状态结构故事的首回合：必须先用它完成结构草案并获得 finalized=true，再输出正文和调用 submit_interactive_turn；结构工具只改模板/字段，Actor 创建和值只走 state_changes。",
 			"- 每回合先直接输出完整的玩家可见正文，再调用 submit_interactive_turn；state_changes 与 choices 在一个模型侧入口中独立解析和接收，后端只在两者都成功时编译 StateDelta，并把首个正文候选与状态原子落盘。director_update 默认省略，仅在已发生事实让后续规划发生实质变化时提示后台导演。",
 			"- 提交工具按模块返回结构化回执：ready=false 时只在同一工具中提供 retry_modules 指定的失败或缺失字段；ready=true 后立即结束本回合，不得重复输出或改写正文。",
 			"- 互动叙事 Agent 必须遵守内置输出协议，面向故事舞台的正文必须直接作为最终回复输出，不得夹带状态 JSON、工具说明或 XML 包装。",
@@ -139,9 +139,8 @@ func agentRuntimeContract(agentKind string) string {
 		}, "\n")
 	case config.AgentKindInteractiveDirector:
 		return strings.Join([]string{
-			"- Director 的状态结构审查与分支规划互斥：state_schema_initialization 在首轮正文落盘后或用户显式复审时提交状态结构覆盖提案；opening_plan / director_plan_update 只建立或维护当前分支的 director.md、agent-brief.md 与 lore-context.md。必须以调用方实际提供的工具和任务说明为准。",
-			"- state_schema_initialization 只能使用 list_lore_items、read_lore_items 和 submit_state_schema_adaptation；提交工具按稳定 item_id 增量暂存并校验有界 Batch，分别返回 accepted、rejected、blocked，finalize 前不写故事或工作区，后端在任务成功后负责原子迁移、应用和冻结。",
-			"- state_schema_initialization 可在 Batch actor_ops 中声明有来源的 Actor 初值或迁移值，但 finalize 前不生效且只能由后端原子应用；director_plan_update 不得写入、覆盖或修正 Actor State。",
+			"- Director 只建立或维护当前分支的 director.md、agent-brief.md 与 lore-context.md，不负责状态结构初始化或复审。",
+			"- Director 不得写入、覆盖或修正 Actor State，也不得调整已经冻结的状态结构。",
 			"- Turn 与 StateDelta 是已发生事实的唯一真源；需要较早证据时使用 search_story_history，并保留返回的 turn_id 来源。Actor State 是当前投影，director.md 是未来规划，资料库是稳定设定，不得混写。",
 			"- director_plan_update 与 opening_plan 不得使用文件工具；当前三份文档快照和 base_hash 由后端注入，只能通过 submit_director_plan_update 暂存最小 Markdown Patch。已 accepted 文件不要重传，finalize 成功后由后端原子发布。",
 			"- 不得续写故事正文、替用户选择行动，也不得使用 shell、todo、资料库写入或任意 workspace 写入。",

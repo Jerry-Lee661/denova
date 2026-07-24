@@ -13,15 +13,28 @@ export function buildStateTree(value: ExplorerProps['value'], t: TFunction): Tre
   // ── Templates group ──────────────────────────────────────────────
   const templateNodes: TreeNode[] = templates.map((template, tIndex) => {
     const fields = template.fields || []
-    const fieldNodes: TreeNode[] = fields.map((field, fIndex) => ({
-      id: fieldNodeId(template.id, field, fIndex),
-      kind: 'field' as const,
-			label: field.name || t('settingPanel.actorState.explorer.fieldFallback', { count: fIndex + 1 }),
-			subtitle: field.type,
-      badge: field.visibility ? visibilityBadge(field.visibility, t) : undefined,
-      selectable: true,
-      children: [],
-      data: { kind: 'field' as const, field, fieldIndex: fIndex, template, templateIndex: tIndex },
+    const groupedFields = new Map<string, Array<{ field: ActorStateField; index: number }>>()
+    fields.forEach((field, index) => {
+      const group = field.group?.trim() || t('settingPanel.actorState.explorer.ungroupedFields')
+      const entries = groupedFields.get(group) || []
+      entries.push({ field, index })
+      groupedFields.set(group, entries)
+    })
+    const fieldGroupNodes: TreeNode[] = Array.from(groupedFields.entries()).map(([group, entries], groupIndex) => ({
+      id: fieldGroupNodeId(template.id, group, groupIndex),
+      kind: 'field-group' as const,
+      label: group,
+      badge: `${entries.length}`,
+      selectable: false,
+      children: entries.map(({ field, index }) => ({
+        id: fieldNodeId(template.id, field, index),
+        kind: 'field' as const,
+        label: field.name || t('settingPanel.actorState.explorer.fieldFallback', { count: index + 1 }),
+        subtitle: field.type,
+        selectable: true,
+        children: [],
+        data: { kind: 'field' as const, field, fieldIndex: index, template, templateIndex: tIndex },
+      })),
     }))
 
     return {
@@ -30,7 +43,7 @@ export function buildStateTree(value: ExplorerProps['value'], t: TFunction): Tre
       label: template.name || template.id || t('settingPanel.actorState.explorer.templateFallback', { count: tIndex + 1 }),
       subtitle: t('settingPanel.actorState.explorer.fieldCount', { count: fields.length }),
       selectable: true,
-      children: fieldNodes,
+      children: fieldGroupNodes,
       data: { kind: 'template' as const, template, index: tIndex },
     }
   })
@@ -52,7 +65,6 @@ export function buildStateTree(value: ExplorerProps['value'], t: TFunction): Tre
       kind: 'trait' as const,
       label: trait.name || trait.id || t('settingPanel.actorState.explorer.traitFallback', { count: tIndex + 1 }),
       subtitle: trait.summary || t('settingPanel.actorState.explorer.weight', { count: trait.weight ?? 1 }),
-      badge: trait.visibility ? visibilityBadge(trait.visibility, t) : undefined,
       selectable: true,
       children: [],
       data: { kind: 'trait' as const, trait, traitIndex: tIndex, pool, poolIndex: pIndex },
@@ -113,6 +125,10 @@ export function fieldNodeId(templateId: string, field: ActorStateField, index: n
 	return `field:${templateId}:${index}`
 }
 
+function fieldGroupNodeId(templateId: string, group: string, index: number): string {
+  return `field-group:${templateId}:${encodeURIComponent(group)}:${index}`
+}
+
 export function actorNodeId(actor: ActorStateInitialActor, index: number): string {
   return `actor:${actor.id || actor.template_id || 'actor'}-${index}`
 }
@@ -123,15 +139,6 @@ export function poolNodeId(pool: ActorTraitPool, index: number): string {
 
 export function traitNodeId(pool: ActorTraitPool, trait: ActorTraitDefinition, index: number): string {
   return `trait:${pool.id || 'pool'}:${trait.id || index}`
-}
-
-function visibilityBadge(visibility: string, t: TFunction): string {
-  switch (visibility) {
-    case 'visible': return t('settingPanel.actorState.explorer.visible')
-    case 'hidden': return t('settingPanel.actorState.explorer.hidden')
-    case 'spoiler': return t('settingPanel.actorState.explorer.spoiler')
-    default: return visibility
-  }
 }
 
 /** Find a node by id in the tree (depth-first). */
@@ -173,7 +180,7 @@ export function getExpandedAncestors(nodes: TreeNode[], id: string): Set<string>
   return expanded
 }
 
-/** Get default expanded set: top-level groups + first template + first pool. */
+/** Get default expanded set: top-level groups + first item and its field groups. */
 export function getDefaultExpanded(nodes: TreeNode[]): Set<string> {
   const expanded = new Set<string>()
   for (const node of nodes) {
@@ -183,6 +190,11 @@ export function getDefaultExpanded(nodes: TreeNode[]): Set<string> {
       const firstChild = node.children[0]
       if (firstChild && firstChild.children.length > 0) {
         expanded.add(firstChild.id)
+        for (const grandchild of firstChild.children) {
+          if (grandchild.kind === 'field-group' && grandchild.children.length > 0) {
+            expanded.add(grandchild.id)
+          }
+        }
       }
     }
   }

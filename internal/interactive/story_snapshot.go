@@ -76,8 +76,14 @@ func snapshotFromLines(storyID, branchID string, meta StoryMeta, lines []StoryEv
 			snapshot.ContextCompactionRemoval = &removal
 		}
 	}
-	if err := applyFrozenMissingInitialActors(state, meta.ActorStateSchema); err != nil {
-		return Snapshot{}, fmt.Errorf("补全冻结初始 Actor 失败: %w", err)
+	initializeActors := true
+	if storyStateSchemaPolicyRequiresOpeningDraft(meta.StateSchemaPolicy) && meta.StateSchemaInitialization != nil && meta.StateSchemaInitialization.Status == StateSchemaInitializationWaitingOpening {
+		initializeActors = false
+	}
+	if initializeActors {
+		if err := applyFrozenMissingInitialActors(state, meta.ActorStateSchema); err != nil {
+			return Snapshot{}, fmt.Errorf("补全冻结初始 Actor 失败: %w", err)
+		}
 	}
 	applyLegacyActorStateAliases(state, meta.ActorStateSchema)
 	if snapshot.CurrentTurn != nil && (snapshot.CurrentTurn.TurnResult == nil || len(snapshot.CurrentTurn.TurnResult.Choices) == 0) && snapshot.CurrentTurn.HotState == nil {
@@ -122,16 +128,17 @@ func turnVersionKey(branchID, parentID string) string {
 
 func initialStoryState() map[string]any {
 	return map[string]any{
-		"on_stage":    []any{},
-		"actors":      map[string]any{},
-		"characters":  map[string]any{},
-		"events":      []any{},
-		"scene":       map[string]any{},
-		"inventory":   map[string]any{},
-		"resources":   map[string]any{},
-		"world_flags": []any{},
-		"rules":       []any{},
-		"threads":     []any{},
+		"on_stage":       []any{},
+		"actors":         map[string]any{},
+		"actor_archives": map[string]any{},
+		"characters":     map[string]any{},
+		"events":         []any{},
+		"scene":          map[string]any{},
+		"inventory":      map[string]any{},
+		"resources":      map[string]any{},
+		"world_flags":    []any{},
+		"rules":          []any{},
+		"threads":        []any{},
 	}
 }
 

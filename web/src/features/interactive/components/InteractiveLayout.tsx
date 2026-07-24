@@ -4,8 +4,9 @@ import { useTranslation } from 'react-i18next'
 import { motion } from 'motion/react'
 import { Group, Panel, Separator } from 'react-resizable-panels'
 import type { Layout } from 'react-resizable-panels'
+import { useShallow } from 'zustand/react/shallow'
 import { readFile } from '@/lib/api'
-import { createInteractiveBranch, createInteractiveStory, deleteInteractiveBranch, deleteInteractiveStory, getInteractiveBranches, getInteractiveSnapshot, getInteractiveStories, getInteractiveTellers, getStoryDirectors, switchInteractiveBranch, updateInteractiveStory } from '../api'
+import { createInteractiveBranch, createInteractiveStory, deleteInteractiveBranch, deleteInteractiveStory, getInteractiveBranches, getInteractiveSnapshot, getInteractiveStories, getInteractiveTellers, getStoryDirectors, selectInteractiveStory, switchInteractiveBranch, updateInteractiveStory } from '../api'
 import { useInteractiveStore } from '../stores/interactive-store'
 import { BranchTimeline } from './BranchTimeline'
 import { DirectorBackstage } from './director-backstage/DirectorBackstage'
@@ -26,6 +27,7 @@ import { INTERACTIVE_OPENING_PRESET_PATH, INTERACTIVE_OPENING_PRESET_UPDATED_EVE
 
 interface InteractiveLayoutProps {
   workspace?: string
+  active?: boolean
   imagePresets?: ImagePreset[]
   onImagePresetsChange?: (presets: ImagePreset[]) => void
   loreEmpty?: boolean
@@ -34,10 +36,50 @@ interface InteractiveLayoutProps {
   onToggleRightPanel?: () => void
 }
 
-export function InteractiveLayout({ workspace, imagePresets = [], onImagePresetsChange, loreEmpty = false, onRequestLoreInit, rightPanelVisible = true, onToggleRightPanel }: InteractiveLayoutProps) {
+const SNAPSHOT_POLL_INTERVAL_MS = 1000
+
+export function InteractiveLayout({ workspace, active = true, imagePresets = [], onImagePresetsChange, loreEmpty = false, onRequestLoreInit, rightPanelVisible = true, onToggleRightPanel }: InteractiveLayoutProps) {
   const { t } = useTranslation()
   const isMobile = useIsMobile()
-  const { stories, tellers, storyDirectors, branches, snapshot, currentStoryId, currentBranchId, submode, setStories, setTellers, setStoryDirectors, setBranches, setSnapshot, applyTurnPersisted, setCurrentStoryId, setCurrentBranchId, setSubmode, resetWorkspaceState } = useInteractiveStore()
+  const {
+    stories,
+    tellers,
+    storyDirectors,
+    branches,
+    snapshot,
+    currentStoryId,
+    currentBranchId,
+    submode,
+    setStories,
+    setTellers,
+    setStoryDirectors,
+    setBranches,
+    setSnapshot,
+    applyTurnPersisted,
+    setCurrentStoryId,
+    setCurrentBranchId,
+    setSubmode,
+    resetWorkspaceState,
+  } = useInteractiveStore(useShallow((state) => ({
+    stories: state.stories,
+    tellers: state.tellers,
+    storyDirectors: state.storyDirectors,
+    branches: state.branches,
+    snapshot: state.snapshot,
+    currentStoryId: state.currentStoryId,
+    currentBranchId: state.currentBranchId,
+    submode: state.submode,
+    setStories: state.setStories,
+    setTellers: state.setTellers,
+    setStoryDirectors: state.setStoryDirectors,
+    setBranches: state.setBranches,
+    setSnapshot: state.setSnapshot,
+    applyTurnPersisted: state.applyTurnPersisted,
+    setCurrentStoryId: state.setCurrentStoryId,
+    setCurrentBranchId: state.setCurrentBranchId,
+    setSubmode: state.setSubmode,
+    resetWorkspaceState: state.resetWorkspaceState,
+  })))
   const currentStory = stories.find((story) => story.id === currentStoryId)
   const currentTeller = tellers.find((teller) => teller.id === currentStory?.story_teller_id)
   const styleSceneSuggestions = Array.from(new Set((currentTeller?.style_rules || []).map((rule) => rule.scene.trim()).filter((scene) => scene && !isGlobalStyleSceneName(scene))))
@@ -45,6 +87,7 @@ export function InteractiveLayout({ workspace, imagePresets = [], onImagePresets
   const storyIndexRequestSeqRef = useRef(0)
   const snapshotStoryIdRef = useRef('')
   const snapshotRequestSeqRef = useRef(0)
+  const storySelectionQueueRef = useRef<Promise<void>>(Promise.resolve())
   const lastStableSnapshotRef = useRef<Snapshot | null>(null)
   const [snapshotLoading, setSnapshotLoading] = useState(false)
   const [snapshotLoadFailed, setSnapshotLoadFailed] = useState(false)
@@ -146,20 +189,42 @@ export function InteractiveLayout({ workspace, imagePresets = [], onImagePresets
   }, [reloadBookOpeningPreset])
 
   useEffect(() => {
+    if (!active) return
     void reloadSnapshot()
-  }, [currentStoryId])
+  }, [active, currentStoryId, reloadSnapshot])
 
   useEffect(() => {
     const branchID = snapshot?.branch_id
     const directorStatus = snapshot?.director_plan_status?.status || ''
     const directorPending = directorStatus === 'running' || (directorStatus === 'waiting_opening' && (snapshot?.turns?.length || 0) > 0)
-    const stateSchemaPending = snapshot?.state_schema_initialization?.status === 'running'
-    if (!branchID || (snapshot?.current_turn?.state_status !== 'pending' && !directorPending && !stateSchemaPending)) return
-    const timer = window.setInterval(() => {
-      void reloadSnapshot(branchID)
-    }, 1000)
-    return () => window.clearInterval(timer)
-  }, [reloadSnapshot, snapshot?.branch_id, snapshot?.current_turn?.id, snapshot?.current_turn?.state_status, snapshot?.director_plan_status?.status, snapshot?.state_schema_initialization?.status, snapshot?.turns?.length])
+    if (!active || !branchID || (snapshot?.current_turn?.state_status !== 'pending' && !directorPending)) return
+    let cancelled = false
+    let timer: number | null = null
+    const clearTimer = () => {
+      if (timer === null) return
+      window.clearTimeout(timer)
+      timer = null
+    }
+    const schedule = () => {
+      clearTimer()
+      if (cancelled || document.visibilityState !== 'visible') return
+      timer = window.setTimeout(() => {
+        timer = null
+        void reloadSnapshot(branchID, undefined, { silent: true }).finally(schedule)
+      }, SNAPSHOT_POLL_INTERVAL_MS)
+    }
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') schedule()
+      else clearTimer()
+    }
+    schedule()
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => {
+      cancelled = true
+      clearTimer()
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+  }, [active, reloadSnapshot, snapshot?.branch_id, snapshot?.current_turn?.id, snapshot?.current_turn?.state_status, snapshot?.director_plan_status?.status, snapshot?.turns?.length])
 
   useEffect(() => {
     if (!isMobile || submode !== 'story') setMobileSnapshotOpen(false)
@@ -172,9 +237,32 @@ export function InteractiveLayout({ workspace, imagePresets = [], onImagePresets
     await reloadStories(story)
   }
 
-  const handleDeleteStory = async (storyId: string) => {
-    await deleteInteractiveStory(storyId)
+  const handleStorySelect = useCallback((storyId: string) => {
+    if (!storyId || storyId === useInteractiveStore.getState().currentStoryId) return
+    setCurrentStoryId(storyId)
+    const persisted = storySelectionQueueRef.current
+      .catch(() => undefined)
+      .then(() => selectInteractiveStory(storyId))
+    storySelectionQueueRef.current = persisted
+    void persisted.catch((error) => {
+      console.error('[interactive-layout] 持久化当前故事线失败', { storyId, error })
+    })
+  }, [setCurrentStoryId])
+
+  const handleDeleteStories = async (storyIds: string[]) => {
+    const uniqueStoryIds = Array.from(new Set(storyIds.filter(Boolean)))
+    if (uniqueStoryIds.length === 0) return
+
+    console.info('[interactive-layout] 开始删除故事线', { count: uniqueStoryIds.length, storyIds: uniqueStoryIds })
+    const results = await Promise.allSettled(uniqueStoryIds.map((storyId) => deleteInteractiveStory(storyId)))
     await reloadStories()
+    const failed = results.flatMap((result, index) => result.status === 'rejected' ? [{ storyId: uniqueStoryIds[index], reason: result.reason }] : [])
+    if (failed.length > 0) {
+      console.error('[interactive-layout] 删除故事线失败', { requested: uniqueStoryIds.length, failed })
+      const reason = failed[0].reason
+      throw reason instanceof Error ? reason : new Error(String(reason))
+    }
+    console.info('[interactive-layout] 故事线删除完成', { count: uniqueStoryIds.length })
   }
 
   const handleStorySetupUpdate = async (input: StoryCreateInput) => {
@@ -184,10 +272,12 @@ export function InteractiveLayout({ workspace, imagePresets = [], onImagePresets
       origin: input.origin,
       story_teller_id: input.story_teller_id,
       story_director_id: input.story_director_id,
+      director_run_policy: input.director_run_policy,
       module_refs: input.module_refs,
       reply_target_chars: input.reply_target_chars,
       choice_count: input.choice_count,
       image_settings: input.image_settings,
+      state_schema_policy: input.state_schema_policy,
     })
     await reloadStories()
     await reloadSnapshot(undefined, currentStoryId, { silent: true })
@@ -290,10 +380,10 @@ export function InteractiveLayout({ workspace, imagePresets = [], onImagePresets
       bookOpeningPresets={bookOpeningPresets}
       directorPanelVisible={directorPanelVisible}
       stateDisplayPreference={storyStateDisplayPreference}
-      onStorySelect={setCurrentStoryId}
+      onStorySelect={handleStorySelect}
       onStoryCreate={handleCreateStory}
       onStorySetupUpdate={handleStorySetupUpdate}
-      onStoryDelete={handleDeleteStory}
+      onStoryDelete={handleDeleteStories}
       onDirectorChange={handleDirectorChange}
       onReplyTargetCharsChange={handleReplyTargetCharsChange}
       onImageSettingsChange={handleImageSettingsChange}
@@ -320,7 +410,7 @@ export function InteractiveLayout({ workspace, imagePresets = [], onImagePresets
               ) : submode === 'director' ? (
                 <DirectorBackstage storyId={currentStoryId} branchId={currentBranchId} snapshot={displaySnapshot} loading={snapshotPending} onSnapshotRefresh={() => reloadSnapshot(currentBranchId, currentStoryId, { silent: true })} />
               ) : submode === 'timeline' ? (
-                <BranchTimeline snapshot={displaySnapshot} branches={branches} currentBranchId={currentBranchId} onSwitchBranch={handleSwitchBranch} onCreateBranch={handleCreateBranch} onDeleteBranch={handleDeleteBranch} fill variant="workspace" onBackToStory={() => setSubmode('story')} headerControls={<StoryPicker stories={stories} currentStoryId={currentStoryId} onSelect={setCurrentStoryId} onCreate={() => undefined} onDelete={handleDeleteStory} hideCreate />} />
+                <BranchTimeline snapshot={displaySnapshot} branches={branches} currentBranchId={currentBranchId} onSwitchBranch={handleSwitchBranch} onCreateBranch={handleCreateBranch} onDeleteBranch={handleDeleteBranch} fill variant="workspace" onBackToStory={() => setSubmode('story')} headerControls={<StoryPicker stories={stories} currentStoryId={currentStoryId} onSelect={handleStorySelect} onCreate={() => undefined} onDeleteStories={handleDeleteStories} hideCreate />} />
               ) : isMobile ? (
                 <MobilePaneHost
                   panes={[{

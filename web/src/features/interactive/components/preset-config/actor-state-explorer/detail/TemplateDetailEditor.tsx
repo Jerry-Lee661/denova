@@ -11,7 +11,6 @@ import type { ActorStateField, ActorStateTemplate } from '../../../../types'
 import type { ExplorerProps, TreeNode } from '../types'
 import { fieldNodeId, findNode, templateNodeId } from '../build-tree'
 import { FieldTypeBadge } from '../shared/FieldTypeBadge'
-import { VisibilityBadge } from '../shared/VisibilityBadge'
 import { DetailResponsiveGrid, DetailStack } from './DetailLayout'
 
 interface TemplateDetailEditorProps {
@@ -62,8 +61,6 @@ export function TemplateDetailEditor({
     const newField: ActorStateField = {
       name: t('settingPanel.actorState.explorer.newField', { count: fields.length + 1 }),
       type: 'string',
-      visibility: 'visible',
-      order: fields.length,
     }
     updateTemplate({ fields: [...fields, newField] })
   }
@@ -160,6 +157,7 @@ export function TemplateDetailEditor({
           </div>
         </section>
 
+        <div className="space-y-6">
         <section className="space-y-2">
           <SectionHeader
             title={t('settingPanel.actorState.explorer.templateTraitRules')}
@@ -226,6 +224,7 @@ export function TemplateDetailEditor({
             ) : null}
           </div>
         </section>
+        </div>
       </DetailResponsiveGrid>
     </DetailStack>
   )
@@ -305,7 +304,6 @@ function FieldInlineRow({
 			{field.name || t('settingPanel.actorState.explorer.unnamedField')}
           </span>
           <FieldTypeBadge type={field.type} />
-          {field.visibility ? <VisibilityBadge visibility={field.visibility} /> : null}
         </div>
 		<div className="mt-0.5 truncate text-[10px] text-[var(--nova-text-faint)]">{t('settingPanel.actorState.explorer.nameIsId')}</div>
       </div>

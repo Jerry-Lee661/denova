@@ -1,6 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { StrictMode, useState } from 'react'
+import { Profiler, StrictMode, useState } from 'react'
 import { VirtuosoMockContext } from 'react-virtuoso'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { StoryStage } from './StoryStage'
@@ -55,7 +55,51 @@ beforeEach(() => {
   useSkillCommandsMock.mockReturnValue([])
 })
 
+describe('StoryStage store subscriptions', () => {
+  it('does not rerender when unrelated interactive store state changes', async () => {
+    let commits = 0
+    render(
+      <Profiler id="story-stage" onRender={() => { commits += 1 }}>
+        <StoryStageHarness />
+      </Profiler>,
+    )
+    await waitFor(() => expect(getActiveInteractiveChatMock).toHaveBeenCalled())
+    await act(async () => undefined)
+    commits = 0
+
+    act(() => {
+      useInteractiveStore.getState().setTellers([])
+    })
+
+    expect(commits).toBe(0)
+  })
+})
+
 describe('StoryStage TurnResult choices', () => {
+	it('places the model selector before the choice control and send action', async () => {
+		render(
+			<VirtuosoMockContext.Provider value={{ viewportHeight: 1200, itemHeight: 120 }}>
+				<StoryStage
+					workspace="/tmp/book"
+					stories={[story()]}
+					story={story()}
+					tellers={[]}
+					storyId="story-1"
+					branchId="main"
+					snapshot={{ story_id: 'story-1', branch_id: 'main', turns: [], state: {} }}
+					onDone={() => undefined}
+				/>
+			</VirtuosoMockContext.Provider>,
+		)
+
+		const modelSelector = await screen.findByRole('button', { name: /切换模型/ })
+		const choiceControl = screen.getByRole('button', { name: '获取行动选择' })
+		const sendAction = screen.getByRole('button', { name: '发送' })
+
+		expect(modelSelector.compareDocumentPosition(choiceControl)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+		expect(choiceControl.compareDocumentPosition(sendAction)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+	})
+
 	it('uses persisted TurnResult choices and only reveals them after the user opens the panel', async () => {
 		const user = userEvent.setup()
 		const turn = {
@@ -570,7 +614,7 @@ describe('StoryStage streaming rendering', () => {
 				stream.enqueue({ event: 'chunk', data: JSON.stringify({ content: '石门后亮起一盏灯。' }) })
 				await Promise.resolve()
 			})
-			expect(await screen.findByText('正在回忆石门后的布局。')).toBeInTheDocument()
+			await expectVisibleText('正在回忆石门后的布局。')
 			await waitFor(() => expect(screen.getByText('石门后亮起一盏灯。')).toBeInTheDocument())
 
 			const persisted = persistedTurnEvent()
@@ -641,7 +685,7 @@ describe('StoryStage streaming rendering', () => {
 		}
 	})
 
-  it('batches fast interactive chunks into one animation frame without slicing text', async () => {
+  it('batches fast interactive chunks into one frame and renders one complete text tree', async () => {
     const user = userEvent.setup()
     const stream = controllableInteractiveStream()
     const originalRequestAnimationFrame = window.requestAnimationFrame
@@ -674,12 +718,12 @@ describe('StoryStage streaming rendering', () => {
 
       act(() => runAnimationFrames(frames))
 
-      expect(container.querySelector('.nova-streaming-markdown-reserve')).toHaveTextContent('青石镇外风声忽然停了。')
-      expect(container.querySelector('.nova-streaming-markdown-overlay')).not.toHaveTextContent('青石镇外风声忽然停了。')
+      expect(container.querySelector('.nova-streaming-content-stage')).toBeNull()
+      expect(await screen.findByText('青石镇外风声忽然停了。')).toBeInTheDocument()
 
       act(() => runAnimationFrames(frames))
 
-      expect(await screen.findByText('青石镇外风声忽然停了。')).toBeInTheDocument()
+			expect(screen.getByText('青石镇外风声忽然停了。')).toBeInTheDocument()
 			stream.enqueue({ event: 'interactive_turn_persisted', data: JSON.stringify(persistedTurnEvent()) })
       stream.enqueue({ event: 'done', data: '{}' })
       stream.close()
@@ -690,9 +734,54 @@ describe('StoryStage streaming rendering', () => {
     }
   })
 
+  it('renders live thinking from one complete text tree after the batched frame', async () => {
+    const user = userEvent.setup()
+    const stream = controllableInteractiveStream()
+    const originalRequestAnimationFrame = window.requestAnimationFrame
+    const originalCancelAnimationFrame = window.cancelAnimationFrame
+    const frames = new Map<number, FrameRequestCallback>()
+    let nextFrameId = 1
+    window.requestAnimationFrame = vi.fn((callback: FrameRequestCallback) => {
+      const id = nextFrameId
+      nextFrameId += 1
+      frames.set(id, callback)
+      return id
+    })
+    window.cancelAnimationFrame = vi.fn((id: number) => {
+      frames.delete(id)
+    })
+
+    try {
+      sendInteractiveMessageMock.mockResolvedValue(stream.readable)
+      const { container } = render(<StoryStageHarness />)
+
+      await user.type(screen.getByPlaceholderText('你要做什么？'), '继续前进')
+      await user.click(screen.getByRole('button', { name: '发送' }))
+
+      await waitFor(() => expect(sendInteractiveMessageMock).toHaveBeenCalled())
+      act(() => runAnimationFrames(frames))
+      stream.enqueue({ event: 'thinking', data: JSON.stringify({ content: '正在检查门后的动静。' }) })
+      await waitFor(() => expect(frames.size).toBeGreaterThan(0))
+
+      act(() => runAnimationFrames(frames))
+
+      expect(container.querySelector('.nova-streaming-content-stage')).toBeNull()
+      expect(await screen.findByText('正在检查门后的动静。')).toBeInTheDocument()
+
+      act(() => runAnimationFrames(frames))
+
+      expect(screen.getByText('正在检查门后的动静。')).toBeInTheDocument()
+    } finally {
+      stream.close()
+      window.requestAnimationFrame = originalRequestAnimationFrame
+      window.cancelAnimationFrame = originalCancelAnimationFrame
+    }
+  })
+
   it('keeps live thinking visible while narrative output starts', async () => {
     const user = userEvent.setup()
     const stream = controllableInteractiveStream()
+    const providerThinking = `正在判断门后的声响。${'继续核对现场线索。'.repeat(300)}供应商思考尾部必须完整展示。`
 
     try {
       sendInteractiveMessageMock.mockResolvedValue(stream.readable)
@@ -703,16 +792,16 @@ describe('StoryStage streaming rendering', () => {
       await waitFor(() => expect(sendInteractiveMessageMock).toHaveBeenCalled())
 
       act(() => {
-        stream.enqueue({ event: 'thinking', data: JSON.stringify({ content: '正在判断门后的声响。' }) })
+        stream.enqueue({ event: 'thinking', data: JSON.stringify({ content: providerThinking }) })
       })
-      expect(await screen.findByText('正在判断门后的声响。')).toBeInTheDocument()
+      await expectVisibleText(providerThinking)
 
       act(() => {
         stream.enqueue({ event: 'chunk', data: JSON.stringify({ content: '门后传来脚步声。' }) })
       })
 
       await waitFor(() => expect(screen.getByText('门后传来脚步声。')).toBeInTheDocument())
-      expect(screen.getByText('正在判断门后的声响。')).toBeInTheDocument()
+      expect(screen.getByText(providerThinking)).toBeInTheDocument()
     } finally {
       stream.close()
     }
@@ -1014,6 +1103,7 @@ describe('StoryStage streaming rendering', () => {
   it('updates a live tool card when an index-based call later receives an id', async () => {
     const user = userEvent.setup()
     const stream = controllableInteractiveStream()
+    const completeArgs = JSON.stringify({ command: `printf '${'工具输入'.repeat(9000)}尾部必须完整展示'` })
 
     try {
       sendInteractiveMessageMock.mockResolvedValue(stream.readable)
@@ -1025,7 +1115,7 @@ describe('StoryStage streaming rendering', () => {
 
       act(() => {
         stream.enqueue({ event: 'tool_call', data: JSON.stringify({ index: 0, name: 'execute', args: '' }) })
-        stream.enqueue({ event: 'tool_args_delta', data: JSON.stringify({ id: 'call-execute', index: 0, name: 'execute', delta: '{"command":"pwd"}' }) })
+        stream.enqueue({ event: 'tool_args_delta', data: JSON.stringify({ id: 'call-execute', index: 0, name: 'execute', delta: completeArgs }) })
         stream.enqueue({ event: 'tool_result', data: JSON.stringify({ id: 'call-execute', index: 0, name: 'execute', content: 'command done' }) })
       })
 
@@ -1034,13 +1124,62 @@ describe('StoryStage streaming rendering', () => {
         const executeMessages = liveMessages.filter((message) => message.role === 'tool_call' && message.name === 'execute')
         expect(executeMessages).toHaveLength(1)
         expect(executeMessages[0]).toMatchObject({
-          args: '{"command":"pwd"}',
+          args: completeArgs,
           status: 'success',
           result: 'command done',
           streaming: false,
         })
       })
     } finally {
+      stream.close()
+    }
+  })
+
+  it('batches consecutive tool argument deltas into one frame update', async () => {
+    const user = userEvent.setup()
+    const stream = controllableInteractiveStream()
+    sendInteractiveMessageMock.mockResolvedValue(stream.readable)
+    let scheduledFrame: FrameRequestCallback | null = null
+    let unsubscribe: () => void = () => {}
+
+    try {
+      render(<StoryStageHarness />)
+      await user.type(screen.getByPlaceholderText('你要做什么？'), '继续前进')
+      await user.click(screen.getByRole('button', { name: '发送' }))
+      await waitFor(() => expect(sendInteractiveMessageMock).toHaveBeenCalled())
+      act(() => {
+        stream.enqueue({ event: 'tool_call', data: JSON.stringify({ id: 'call-execute', name: 'execute', args: '' }) })
+      })
+      await waitFor(() => {
+        const messages = useInteractiveStore.getState().storyStageRuns['/tmp/book:story-1:main']?.liveMessages || []
+        expect(messages.some((message) => message.id === 'call-execute')).toBe(true)
+      })
+
+      vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback: FrameRequestCallback) => {
+        scheduledFrame = callback
+        return 91
+      })
+      let storeUpdates = 0
+      unsubscribe = useInteractiveStore.subscribe(() => { storeUpdates += 1 })
+
+      await act(async () => {
+        stream.enqueue({ event: 'tool_args_delta', data: JSON.stringify({ id: 'call-execute', name: 'execute', delta: 'first' }) })
+        stream.enqueue({ event: 'tool_args_delta', data: JSON.stringify({ id: 'call-execute', name: 'execute', delta: '-last' }) })
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+
+      expect(storeUpdates).toBe(0)
+      expect(scheduledFrame).not.toBeNull()
+      act(() => {
+        ;(scheduledFrame as FrameRequestCallback)(0)
+      })
+      const messages = useInteractiveStore.getState().storyStageRuns['/tmp/book:story-1:main']?.liveMessages || []
+      expect(storeUpdates).toBe(1)
+      expect(messages.find((message) => message.id === 'call-execute')?.args).toBe('first-last')
+    } finally {
+      unsubscribe()
+      vi.restoreAllMocks()
       stream.close()
     }
   })
@@ -1495,6 +1634,13 @@ function runAnimationFrames(frames: Map<number, FrameRequestCallback>) {
   for (const [, callback] of callbacks) {
     callback(performance.now())
   }
+}
+
+async function expectVisibleText(text: string) {
+  await waitFor(() => {
+    const visible = screen.getAllByText(text).find((element) => !element.closest('[aria-hidden="true"]'))
+    expect(visible).toBeVisible()
+  })
 }
 
 function deferred<T>() {

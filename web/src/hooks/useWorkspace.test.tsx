@@ -1,21 +1,35 @@
 import { useEffect } from 'react'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { WorkspaceFileRevisionConflictError } from '@/lib/autosave/workspace-file-revision-conflict'
 import { useWorkspace } from './useWorkspace'
 
-const apiMock = vi.hoisted(() => ({
-  copyWorkspaceItem: vi.fn(),
-  createWorkspaceItem: vi.fn(),
-  deleteWorkspaceItem: vi.fn(),
-  getBookshelf: vi.fn(),
-  getCurrentWorkspace: vi.fn(),
-  getWorkspaceSummary: vi.fn(),
-  getWorkspaceTree: vi.fn(),
-  moveWorkspaceItem: vi.fn(),
-  readFile: vi.fn(),
-  renameWorkspaceItem: vi.fn(),
-  saveFile: vi.fn(),
-}))
+const apiMock = vi.hoisted(() => {
+  class MockAPIError extends Error {
+    readonly status: number
+    readonly code?: string
+
+    constructor(message: string, options: { status: number; code?: string }) {
+      super(message)
+      this.status = options.status
+      this.code = options.code
+    }
+  }
+  return {
+    APIError: MockAPIError,
+    copyWorkspaceItem: vi.fn(),
+    createWorkspaceItem: vi.fn(),
+    deleteWorkspaceItem: vi.fn(),
+    getBookshelf: vi.fn(),
+    getCurrentWorkspace: vi.fn(),
+    getWorkspaceSummary: vi.fn(),
+    getWorkspaceTree: vi.fn(),
+    moveWorkspaceItem: vi.fn(),
+    readFile: vi.fn(),
+    renameWorkspaceItem: vi.fn(),
+    saveFile: vi.fn(),
+  }
+})
 
 vi.mock('@/lib/api', () => apiMock)
 
@@ -29,17 +43,73 @@ describe('useWorkspace', () => {
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     vi.restoreAllMocks()
   })
 
-  it('关闭自动刷新时不注册目录和统计的后台轮询', async () => {
-    const setIntervalSpy = vi.spyOn(window, 'setInterval')
-
+  it('关闭后台刷新时窗口唤醒也不扫描目录和章节统计', async () => {
     render(<WorkspaceHarness autoRefreshEnabled={false} onChange={() => {}} />)
 
     await waitFor(() => expect(apiMock.getWorkspaceTree).toHaveBeenCalledTimes(1))
     expect(apiMock.getWorkspaceSummary).toHaveBeenCalledTimes(1)
-    expect(setIntervalSpy.mock.calls.some(([, timeout]) => timeout === TREE_AUTO_REFRESH_INTERVAL_MS_FOR_TEST)).toBe(false)
+    apiMock.getWorkspaceTree.mockClear()
+    apiMock.getWorkspaceSummary.mockClear()
+
+    act(() => {
+      fireEvent.focus(window)
+    })
+
+    expect(apiMock.getWorkspaceTree).not.toHaveBeenCalled()
+    expect(apiMock.getWorkspaceSummary).not.toHaveBeenCalled()
+  })
+
+  it('启用后台刷新时也不按固定周期扫描目录和章节统计', async () => {
+    vi.useFakeTimers()
+
+    render(<WorkspaceHarness onChange={() => {}} />)
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(apiMock.getWorkspaceTree).toHaveBeenCalledTimes(1)
+    expect(apiMock.getWorkspaceSummary).toHaveBeenCalledTimes(1)
+
+    apiMock.getWorkspaceTree.mockClear()
+    apiMock.getWorkspaceSummary.mockClear()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000)
+    })
+
+    expect(apiMock.getWorkspaceTree).not.toHaveBeenCalled()
+    expect(apiMock.getWorkspaceSummary).not.toHaveBeenCalled()
+  })
+
+  it('合并自动刷新期间的重复唤醒，避免目录和统计请求重叠', async () => {
+    render(<WorkspaceHarness onChange={() => {}} />)
+    await waitFor(() => expect(apiMock.getWorkspaceTree).toHaveBeenCalledTimes(1))
+
+    const treeRefresh = deferred<unknown[]>()
+    const summaryRefresh = deferred<{ title: string; author: string; chapter_count: number; total_words: number; chapters: unknown[] }>()
+    apiMock.getWorkspaceTree.mockClear()
+    apiMock.getWorkspaceSummary.mockClear()
+    apiMock.getWorkspaceTree.mockReturnValue(treeRefresh.promise)
+    apiMock.getWorkspaceSummary.mockReturnValue(summaryRefresh.promise)
+
+    act(() => {
+      fireEvent.focus(window)
+      fireEvent.focus(window)
+    })
+
+    expect(apiMock.getWorkspaceTree).toHaveBeenCalledTimes(1)
+    expect(apiMock.getWorkspaceSummary).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      treeRefresh.resolve([])
+      summaryRefresh.resolve({ title: '', author: '', chapter_count: 0, total_words: 0, chapters: [] })
+      await Promise.all([treeRefresh.promise, summaryRefresh.promise])
+    })
   })
 
   it('暴露书架与快捷切换器共用的排序模式', async () => {
@@ -120,6 +190,84 @@ describe('useWorkspace', () => {
     expect(apiMock.saveFile).toHaveBeenLastCalledWith('chapters/ch01.md', '第二次保存', 'rev-2', '/books/demo')
   })
 
+  it('文件落盘成功后立即确认保存，不等待章节统计刷新', async () => {
+    apiMock.readFile.mockResolvedValue({ workspace: '/books/demo', path: 'chapters/ch01.md', content: '旧内容', revision: 'rev-1' })
+    apiMock.saveFile.mockResolvedValue({ path: 'chapters/ch01.md', message: 'ok', revision: 'rev-2' })
+
+    let workspace: ReturnType<typeof useWorkspace> | null = null
+    render(<WorkspaceHarness autoRefreshEnabled={false} onChange={(value) => { workspace = value }} />)
+
+    await waitFor(() => expect(apiMock.getWorkspaceSummary).toHaveBeenCalledTimes(1))
+    await act(async () => {
+      await workspace?.selectFile('chapters/ch01.md')
+    })
+
+    const summaryRefresh = deferred<{ title: string; author: string; chapter_count: number; total_words: number; chapters: [] }>()
+    apiMock.getWorkspaceSummary.mockClear()
+    apiMock.getWorkspaceSummary.mockReturnValue(summaryRefresh.promise)
+    let saveSettled = false
+    let saveRequest!: Promise<unknown>
+
+    act(() => {
+      saveRequest = workspace!.saveFileDraft('chapters/ch01.md', '新内容', 'rev-1')
+      void saveRequest.then(() => {
+        saveSettled = true
+      })
+    })
+
+    await waitFor(() => expect(apiMock.getWorkspaceSummary).toHaveBeenCalledTimes(1))
+    await act(async () => {
+      await Promise.resolve()
+    })
+    const settledBeforeSummary = saveSettled
+
+    await act(async () => {
+      summaryRefresh.resolve({ title: '', author: '', chapter_count: 0, total_words: 0, chapters: [] })
+      await saveRequest
+    })
+
+    expect(settledBeforeSummary).toBe(true)
+  })
+
+  it('连续保存时合并后台章节统计刷新，避免整本作品并行扫描', async () => {
+    apiMock.readFile.mockResolvedValue({ workspace: '/books/demo', path: 'chapters/ch01.md', content: '旧内容', revision: 'rev-1' })
+    apiMock.saveFile
+      .mockResolvedValueOnce({ path: 'chapters/ch01.md', message: 'ok', revision: 'rev-2' })
+      .mockResolvedValueOnce({ path: 'chapters/ch01.md', message: 'ok', revision: 'rev-3' })
+
+    let workspace: ReturnType<typeof useWorkspace> | null = null
+    render(<WorkspaceHarness autoRefreshEnabled={false} onChange={(value) => { workspace = value }} />)
+    await waitFor(() => expect(apiMock.getWorkspaceSummary).toHaveBeenCalledTimes(1))
+    await act(async () => {
+      await workspace?.selectFile('chapters/ch01.md')
+    })
+
+    const firstSummaryRefresh = deferred<{ title: string; author: string; chapter_count: number; total_words: number; chapters: [] }>()
+    const trailingSummaryRefresh = deferred<{ title: string; author: string; chapter_count: number; total_words: number; chapters: [] }>()
+    apiMock.getWorkspaceSummary.mockClear()
+    apiMock.getWorkspaceSummary
+      .mockReturnValueOnce(firstSummaryRefresh.promise)
+      .mockReturnValueOnce(trailingSummaryRefresh.promise)
+
+    await act(async () => {
+      await workspace?.saveFileDraft('chapters/ch01.md', '第一次保存', 'rev-1')
+      await workspace?.saveFileDraft('chapters/ch01.md', '第二次保存', 'rev-2')
+    })
+    const callsWhileFirstRefreshPending = apiMock.getWorkspaceSummary.mock.calls.length
+
+    await act(async () => {
+      firstSummaryRefresh.resolve({ title: '', author: '', chapter_count: 0, total_words: 1, chapters: [] })
+      await firstSummaryRefresh.promise
+    })
+    await waitFor(() => expect(apiMock.getWorkspaceSummary).toHaveBeenCalledTimes(2))
+    await act(async () => {
+      trailingSummaryRefresh.resolve({ title: '', author: '', chapter_count: 0, total_words: 2, chapters: [] })
+      await trailingSummaryRefresh.promise
+    })
+
+    expect(callsWhileFirstRefreshPending).toBe(1)
+  })
+
   it('文件切换期间的迟到保存不会污染新文件的 revision', async () => {
     const firstSave = deferred<{ path: string; message: string; revision: string }>()
     apiMock.readFile.mockImplementation((path: string) => Promise.resolve(
@@ -168,7 +316,7 @@ describe('useWorkspace', () => {
 
     let workspace: ReturnType<typeof useWorkspace> | null = null
     render(<WorkspaceHarness onChange={(value) => { workspace = value }} />)
-    await waitFor(() => expect(apiMock.getCurrentWorkspace).toHaveBeenCalled())
+    await waitFor(() => expect(screen.getByTestId('workspace-meta')).toHaveTextContent('/books/demo'))
     await act(async () => {
       await workspace?.selectFile('chapters/ch01.md')
     })
@@ -228,6 +376,68 @@ describe('useWorkspace', () => {
     })
 
     expect(apiMock.saveFile).toHaveBeenLastCalledWith('chapters/ch01.md', '基于 Agent 版本继续保存', 'rev-3', '/books/demo')
+  })
+
+  it('编辑器草稿保存使用草稿自己的 baseline revision，不被 Agent reload 偷换', async () => {
+    apiMock.readFile
+      .mockResolvedValueOnce({ workspace: '/books/demo', path: 'chapters/ch01.md', content: '初始', revision: 'rev-1' })
+      .mockResolvedValueOnce({ workspace: '/books/demo', path: 'chapters/ch01.md', content: 'Agent 新内容', revision: 'rev-2' })
+    apiMock.saveFile.mockResolvedValue({ path: 'chapters/ch01.md', message: 'ok', revision: 'rev-3' })
+
+    let workspace: ReturnType<typeof useWorkspace> | null = null
+    render(<WorkspaceHarness onChange={(value) => { workspace = value }} />)
+    await waitFor(() => expect(apiMock.getCurrentWorkspace).toHaveBeenCalled())
+    await act(async () => {
+      await workspace?.selectFile('chapters/ch01.md')
+      await workspace?.refreshAfterAgentFileChange('chapters/ch01.md')
+    })
+
+    await act(async () => {
+      await workspace?.saveFileDraft('chapters/ch01.md', '基于旧草稿的本地内容', 'rev-1')
+    })
+
+    expect(apiMock.saveFile).toHaveBeenLastCalledWith(
+      'chapters/ch01.md',
+      '基于旧草稿的本地内容',
+      'rev-1',
+      '/books/demo',
+    )
+  })
+
+  it('revision 冲突时把重新读取的完整快照交给编辑器适配层', async () => {
+    apiMock.readFile.mockReset()
+    apiMock.saveFile.mockReset()
+    apiMock.readFile
+      .mockResolvedValueOnce({ workspace: '/books/demo', path: 'chapters/ch01.md', content: '基线', revision: 'rev-1' })
+      .mockResolvedValueOnce({ workspace: '/books/demo', path: 'chapters/ch01.md', content: 'Agent 新内容', revision: 'rev-2' })
+    apiMock.saveFile.mockRejectedValue(new apiMock.APIError('revision conflict', {
+      status: 409,
+      code: 'revision_conflict',
+    }))
+
+    let workspace: ReturnType<typeof useWorkspace> | null = null
+    render(<WorkspaceHarness onChange={(value) => { workspace = value }} />)
+    await waitFor(() => expect(screen.getByTestId('workspace-meta')).toHaveTextContent('/books/demo'))
+    await act(async () => {
+      await workspace?.selectFile('chapters/ch01.md')
+    })
+
+    let caught: unknown
+    await act(async () => {
+      try {
+        await workspace?.saveFileDraft('chapters/ch01.md', '本地内容', 'rev-1')
+      } catch (error) {
+        caught = error
+      }
+    })
+
+    expect(caught).toBeInstanceOf(WorkspaceFileRevisionConflictError)
+    expect((caught as WorkspaceFileRevisionConflictError).latest).toEqual({
+      workspace: '/books/demo',
+      content: 'Agent 新内容',
+      revision: 'rev-2',
+    })
+    expect(screen.getByTestId('workspace-state')).toHaveTextContent('Agent 新内容')
   })
 
   it('工作区切换后目录和统计的旧响应不会落入新工作区', async () => {
@@ -315,7 +525,7 @@ function WorkspaceHarness({
   useEffect(() => onChange(workspace), [onChange, workspace])
   return (
     <>
-      <div data-testid="workspace-state">{workspace.selectedFile}|{workspace.fileContent}</div>
+      <div data-testid="workspace-state">{workspace.selectedFile}|{workspace.fileContent}|{workspace.fileRevision}</div>
       <div data-testid="workspace-meta">{workspace.workspace}|{workspace.tree.map((node) => node.name).join(',')}|{workspace.summary?.title ?? ''}|{workspace.bookSortMode}</div>
     </>
   )
@@ -330,5 +540,3 @@ function deferred<T>() {
   })
   return { promise, resolve, reject }
 }
-
-const TREE_AUTO_REFRESH_INTERVAL_MS_FOR_TEST = 3000

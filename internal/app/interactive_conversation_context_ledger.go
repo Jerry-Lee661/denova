@@ -7,7 +7,6 @@ import (
 
 	"github.com/cloudwego/eino/schema"
 
-	"denova/config"
 	"denova/internal/agent"
 	agentcontext "denova/internal/agent/context"
 	"denova/internal/book"
@@ -72,7 +71,7 @@ func interactiveCompactionResultForMessages(result agent.ContextCompactionResult
 	return result
 }
 
-func interactiveStoryContextSources(title, origin string, teller interactive.Teller, historyCheckpoint, directorPlanVisible, residentLore, loreRevision, loreRuntime, ruleSummary, actorStateRuntime, strategyPrompt string, turnHistory interactiveTurnHistory, userAction string) []interactiveContextSource {
+func interactiveStoryContextSources(title, origin string, teller interactive.Teller, historyCheckpoint, directorPlanVisible, residentLore, loreRevision, loreRuntime, ruleSummary, actorStateRuntime, stateSchemaInitialization, strategyPrompt string, turnHistory interactiveTurnHistory, userAction string) []interactiveContextSource {
 	parts := []interactiveContextSource{
 		{Source: "互动故事", Title: "故事标题", Content: title, Note: "metadata_only", MetadataOnly: true},
 		{Source: "互动故事", Title: "开端", Content: origin, Note: "metadata_only", MetadataOnly: true},
@@ -120,6 +119,12 @@ func interactiveStoryContextSources(title, origin string, teller interactive.Tel
 		parts = append(parts, interactiveContextSource{
 			Source: "ActorState", Title: "当前 Actor 状态手册", Purpose: "turn-scoped state write guide",
 			Content: actorStateRuntime, Note: "source=effective Actor schema + Snapshot.State.actors; missing initial Actors projected in memory; bounded", Limit: interactiveStoryRuntimeContextBytes,
+		})
+	}
+	if strings.TrimSpace(stateSchemaInitialization) != "" {
+		parts = append(parts, interactiveContextSource{
+			Source: "StoryMeta.state_schema_policy", Title: "开局状态结构契约", Purpose: "opening-only schema initialization protocol",
+			Content: stateSchemaInitialization, Note: "source=story policy + initialization status; bounded", Limit: interactiveStoryRuntimeContextBytes,
 		})
 	}
 	if strings.TrimSpace(strategyPrompt) != "" {
@@ -220,7 +225,7 @@ func joinInteractiveContextNote(existing, extra string) string {
 }
 
 func addFinalInteractiveMessageContextParts(ledger *agent.ContextLedger, messages []*schema.Message, policy agent.ToolResultContextPolicy) {
-	policy = normalizeInteractiveToolResultContextPolicy(policy)
+	resultLimit := policy.MaxResultBytes
 	for index, msg := range messages {
 		if msg == nil {
 			continue
@@ -236,36 +241,23 @@ func addFinalInteractiveMessageContextParts(ledger *agent.ContextLedger, message
 				data, _ := json.Marshal(call)
 				toolName := strings.TrimSpace(call.Function.Name)
 				toolID := strings.TrimSpace(call.ID)
-				note := fmt.Sprintf("tool_name=%s; tool_call_id=%s; args_preview_chars=%d; hard_limit=%d; limit_unit=chars; limit_scope=arguments; final_message=true", toolName, toolID, policy.PreviewChars, policy.PreviewChars)
-				ledger.AddPartWithLimitUnit(
+				note := fmt.Sprintf("tool_name=%s; tool_call_id=%s; source=model_tool_call; preserved_exactly=true; bounded_by=model_completion; final_message=true", toolName, toolID)
+				ledger.AddPart(
 					"历史工具上下文", interactiveToolContextTitle("工具调用", toolName, toolID), "paired cross-turn tool call",
-					string(data), note, true, interactiveToolContextTruncated(call.Function.Arguments), policy.PreviewChars, "chars",
+					string(data), note, true, false, 0,
 				)
 			}
 		}
 		if msg.Role == schema.Tool {
 			toolName := strings.TrimSpace(msg.ToolName)
 			toolID := strings.TrimSpace(msg.ToolCallID)
-			note := fmt.Sprintf("tool_name=%s; tool_call_id=%s; semantic_filtered=true; total_budget_bytes=%d; final_message=true", toolName, toolID, policy.BudgetBytes)
+			note := fmt.Sprintf("tool_name=%s; tool_call_id=%s; semantic_filtered=true; single_result_limit_bytes=%d; final_message=true", toolName, toolID, resultLimit)
 			ledger.AddPart(
 				"历史工具上下文", interactiveToolContextTitle("工具结果", toolName, toolID), "paired cross-turn tool result",
-				msg.Content, note, true, interactiveToolContextTruncated(msg.Content), policy.BudgetBytes,
+				msg.Content, note, true, interactiveToolContextTruncated(msg.Content), resultLimit,
 			)
 		}
 	}
-}
-
-func normalizeInteractiveToolResultContextPolicy(policy agent.ToolResultContextPolicy) agent.ToolResultContextPolicy {
-	if policy.KeepRecent <= 0 {
-		policy.KeepRecent = config.DefaultToolResultKeepRecent
-	}
-	if policy.BudgetBytes <= 0 {
-		policy.BudgetBytes = config.DefaultToolResultContextBudgetKB * 1024
-	}
-	if policy.PreviewChars <= 0 {
-		policy.PreviewChars = config.DefaultToolResultPreviewChars
-	}
-	return policy
 }
 
 func interactiveToolContextTitle(kind, toolName, toolID string) string {
@@ -280,9 +272,8 @@ func interactiveToolContextTitle(kind, toolName, toolID string) string {
 }
 
 func interactiveToolContextTruncated(content string) bool {
-	return strings.Contains(content, "truncated for retained context") ||
-		strings.Contains(content, "preview truncated for context") ||
-		strings.Contains(content, "retained tool result placeholder")
+	return strings.Contains(content, "[tool result truncated]") ||
+		strings.Contains(content, `"schema":"tool_result.retained.v1"`)
 }
 
 func interactiveTellerSlotSources(teller interactive.Teller, targets ...string) []interactiveContextSource {

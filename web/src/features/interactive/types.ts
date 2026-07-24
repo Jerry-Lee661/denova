@@ -8,15 +8,30 @@ export interface StorySummary {
   origin: string
   story_teller_id: string
   story_director_id: string
+  director_run_policy?: StoryDirectorRunPolicy
   module_refs?: StoryDirectorModuleRefs
   reply_target_chars: number
   choice_count: number
   image_settings?: StoryImageSettings
   opening: StoryOpeningConfig
+  state_schema_policy?: StoryStateSchemaPolicy
   created_at: string
   updated_at: string
   branches: number
   events: number
+}
+
+export type StoryStateSchemaMode = 'adapt_template' | 'fixed_template' | 'generate'
+
+export interface StoryStateSchemaPolicy {
+  mode: StoryStateSchemaMode
+}
+
+export type StoryDirectorRunMode = 'on_demand' | 'manual' | 'interval'
+
+export interface StoryDirectorRunPolicy {
+  mode: StoryDirectorRunMode
+  interval_turns?: number
 }
 
 type StoryImageMode = 'manual' | 'interval'
@@ -181,7 +196,6 @@ interface StoryDirectorStrategy {
   director_agent_mode?: 'triggered' | 'every_turn' | 'off' | string
   rule_state_consumption_mode?: 'hybrid_auto' | 'director_only' | string
   rule_visibility_mode?: 'audit_only' | 'public_roll' | string
-  state_schema_adaptation_mode?: 'after_opening' | 'off' | string
   branch_planning_turns?: number
   planning_templates?: DirectorPlanningTemplates
   prompt_markdown?: string
@@ -203,6 +217,8 @@ export interface ActorStateTemplate {
   description?: string
   fields?: ActorStateField[]
   trait_rules?: ActorTraitRule[]
+  /** Legacy Beta input retained for API compatibility; normalized schemas ignore it. */
+  display_groups?: string[]
 }
 
 export interface ActorTraitRule {
@@ -222,7 +238,6 @@ export interface ActorTraitDefinition {
   name: string
   summary?: string
   weight?: number
-  visibility?: 'visible' | 'hidden' | 'spoiler'
 }
 
 export interface ActorTraitInstance {
@@ -231,7 +246,6 @@ export interface ActorTraitInstance {
   trait_id: string
   name: string
   summary?: string
-  visibility?: 'visible' | 'hidden' | 'spoiler'
   source_kind?: string
   source_id?: string
   source_turn_id?: string
@@ -257,10 +271,14 @@ export interface ActorStateField {
   min?: number
   max?: number
   options?: string[]
-  visibility?: 'visible' | 'hidden' | 'spoiler'
   description?: string
   update_instruction?: string
+  /** Legacy Beta input retained for API compatibility; field array order is the fallback. */
   order?: number
+  /** Optional presentation hint: cluster fields under one named ledger section. */
+  group?: string
+  /** Optional presentation hint: pin the field renderer; falls back to heuristics when empty. */
+  display?: 'stat' | 'inline' | 'block' | 'list'
 }
 
 export interface ActorStateInitialActor {
@@ -632,6 +650,7 @@ export interface RuleStateBinding {
 export interface RuleStateBindingModifier {
   source?: 'actor' | 'target' | string
   field_id?: string
+  value_path?: string[]
   effect?: 'advantage' | 'resistance' | string
   scale?: number
   offset?: number
@@ -671,6 +690,7 @@ export interface RuleStateChangeFormula {
 export interface RuleStateFormulaTerm {
   source?: 'actor' | 'target' | string
   field_id?: string
+  value_path?: string[]
   scale?: number
   offset?: number
 }
@@ -871,7 +891,6 @@ export interface ActorStateSchemaRequirementSource {
 export interface ActorStateSchemaRequirementReview {
 	source: ActorStateSchemaRequirementSource
 	requirement: string
-	evidence_kind: 'confirmed' | 'inferred' | 'default' | string
 	value_policy?: 'schema_only' | 'preserve' | 'initialize' | 'defer' | string
 	actor_id?: string
 	expected_type?: string
@@ -895,27 +914,25 @@ export interface ActorStateSchemaAdaptationChange {
 		source_id: string
 		item_id: string
 		source: ActorStateSchemaRequirementSource
-		evidence_kind: string
 	}
 }
 
 export interface StateSchemaInitializationStatus {
-	mode: 'after_opening' | 'off' | string
-	status: 'waiting_opening' | 'running' | 'ready' | 'failed' | 'skipped' | string
-	outcome?: 'changed' | 'unchanged' | string
-	source_turn_id?: string
-	base_revision?: number
-	target_revision?: number
-	summary?: string
-	error?: string
-	lore_revision?: string
-	reviewed_lore_ids?: string[]
-	requirements?: ActorStateSchemaRequirementReview[]
-	changes?: ActorStateSchemaAdaptationChange[]
-	warnings?: string[]
-	started_at?: string
-	completed_at?: string
-	updated_at?: string
+  mode: StoryStateSchemaMode
+  status: 'waiting_opening' | 'ready'
+  outcome?: 'changed' | 'unchanged' | 'fixed'
+  source_turn_id?: string
+  base_revision?: number
+  target_revision?: number
+  summary?: string
+  lore_revision?: string
+  reviewed_lore_ids?: string[]
+  requirements?: ActorStateSchemaRequirementReview[]
+  changes?: ActorStateSchemaAdaptationChange[]
+  warnings?: string[]
+  started_at?: string
+  completed_at?: string
+  updated_at?: string
 }
 
 interface ContextCompactionEvent {

@@ -56,7 +56,7 @@ type storyDirectorWriteInput struct {
 type storyDirectorWriteOperation struct {
 	Op       string                    `json:"op" jsonschema:"description=操作类型：create/update/delete"`
 	ID       string                    `json:"id" jsonschema:"description=目标故事导演 ID；update/delete 必填"`
-	Director interactive.StoryDirector `json:"director" jsonschema:"description=create/update 使用的完整故事导演配置；module_refs 保存叙事风格、多个事件包、TRPG 检定、状态系统（actor_state）和图像方案引用，并用 *_disabled 显式关闭某个模块；事件包使用 event_package_ids；TRPG 检定使用 rule_system_id 选择一个 DM 检定风格资源；状态系统使用 actor_state_id，状态模板可表示故事上下文、主角、重要角色、敌人、怪物、世界、故事倒计时、势力、基地或副本等 Actor；词条库属于状态系统 actor_state.trait_pools，模板通过 trait_rules 声明可用池和 draw_count；TRPG 资源只配置一项 rule_templates[0]，检定固定 d20，可配置 trigger、must_check_examples、skip_check_examples、difficulty_guidance、state_effect_guidance 和 state_bindings；带 state_bindings 的 TRPG 资源需要 actor_state_id；strategy 建议使用枚举 mainline_strength=soft_guidance/balanced/strong_arc，failure_policy=reversible/consequence/fail_forward，pacing_curve=progressive/wave/goal-pressure-payoff，event_frequency=off/sparse/balanced/frequent，state_schema_adaptation_mode=after_opening/off 默认 after_opening，rule_state_consumption_mode=hybrid_auto/director_only 默认 hybrid_auto，rule_visibility_mode=audit_only/public_roll 默认 audit_only，branch_planning_turns 默认 5；strategy.planning_templates.plan 可配置单份 director.md Markdown 模板且必须保留固定标题；strategy.prompt_markdown 可写纯 Markdown 高级策略提示，最多 64KB，不能覆盖结构化策略和输出协议"`
+	Director interactive.StoryDirector `json:"director" jsonschema:"description=create/update 使用的完整故事导演配置；module_refs 保存叙事风格、多个事件包、TRPG 检定、状态系统（actor_state）和图像方案引用，并用 *_disabled 显式关闭某个模块；事件包使用 event_package_ids；TRPG 检定使用 rule_system_id 选择一个 DM 检定风格资源；状态系统使用 actor_state_id，状态模板可表示故事上下文、主角、重要角色、敌人、怪物、世界、故事倒计时、势力、基地或副本等 Actor；词条库属于状态系统 actor_state.trait_pools，模板通过 trait_rules 声明可用池和 draw_count；TRPG 资源只配置一项 rule_templates[0]，检定固定 d20，可配置 trigger、must_check_examples、skip_check_examples、difficulty_guidance、state_effect_guidance 和 state_bindings；带 state_bindings 的 TRPG 资源需要 actor_state_id；strategy 建议使用枚举 mainline_strength=soft_guidance/balanced/strong_arc，failure_policy=reversible/consequence/fail_forward，pacing_curve=progressive/wave/goal-pressure-payoff，event_frequency=off/sparse/balanced/frequent，rule_state_consumption_mode=hybrid_auto/director_only 默认 hybrid_auto，rule_visibility_mode=audit_only/public_roll 默认 audit_only，branch_planning_turns 默认 5；状态结构策略由新故事开局页面配置，不属于故事导演；strategy.planning_templates.plan 可配置单份 director.md Markdown 模板且必须保留固定标题；strategy.prompt_markdown 可写纯 Markdown 高级策略提示，最多 64KB，不能覆盖结构化策略和输出协议"`
 }
 
 type eventPackageWriteInput struct {
@@ -78,7 +78,7 @@ type actorStateWriteInput struct {
 type actorStateWriteOperation struct {
 	Op         string                       `json:"op" jsonschema:"description=操作类型：create/update/delete"`
 	ID         string                       `json:"id" jsonschema:"description=目标状态系统 ID；update/delete 必填"`
-	ActorState interactive.ActorStateModule `json:"actor_state" jsonschema:"description=create/update 使用的完整状态系统模块配置；actor_state.templates 定义状态模板和字段 schema，templates[].trait_rules 通过 pool_id 与 draw_count 绑定词条池；actor_state.trait_pools 是可复用词条库，词条只含 id、name、summary、weight、visibility，不得含 ops；initial_actors 是初始 Actor 实例。Actor 创建时后端会写入默认值、实例覆盖值并自动抽取词条快照"`
+	ActorState interactive.ActorStateModule `json:"actor_state" jsonschema:"description=create/update 使用的完整状态系统模块配置；actor_state.templates 定义状态模板和字段 schema，templates[].trait_rules 通过 pool_id 与 draw_count 绑定词条池；actor_state.trait_pools 是可复用词条库，词条只含 id、name、summary、weight，不得含 ops；initial_actors 是初始 Actor 实例。Actor 创建时后端会写入默认值、实例覆盖值并自动抽取词条快照"`
 }
 
 type imagePresetWriteInput struct {
@@ -575,7 +575,7 @@ func newListActorStatesTool(novaDir string) (tool.BaseTool, error) {
 }
 
 func newReadActorStatesTool(novaDir string) (tool.BaseTool, error) {
-	return utils.InferTool("read_actor_states", "按状态系统 ID 批量读取完整配置。字段 schema 支持 name/type/default/min/max/options/visibility/description/update_instruction/order；规范化后的 name 同时是状态 ID，同一模板内不可重名。trait_pools 定义可复用词条，模板 trait_rules 声明创建 Actor 时的自动抽取规则；initial_actors 定义初始 Actor。故事先冻结原始预设，首轮正文落盘后默认由初始化 Director 生成一次故事专属差异并迁移；state_schema_adaptation_mode=off 时始终使用原始预设。后续所有字段引用使用 actor_id + field_id。", func(ctx context.Context, input idListInput) (string, error) {
+	return utils.InferTool("read_actor_states", "按状态系统 ID 批量读取完整配置。字段 schema 支持 name/type/default/min/max/options/description/update_instruction/order；规范化后的 name 同时是状态 ID，同一模板内不可重名。trait_pools 定义可复用词条，模板 trait_rules 声明创建 Actor 时的自动抽取规则；initial_actors 定义初始 Actor。新故事在开局页面选择固定模板、Game Agent 动态适配模板或 Game Agent 动态生成；旧故事固定使用已冻结结构。后续所有字段引用使用 actor_id + field_id。", func(ctx context.Context, input idListInput) (string, error) {
 		_ = ctx
 		if novaDir == "" {
 			return "", fmt.Errorf("nova_dir 不可用，无法读取状态系统")
@@ -598,7 +598,7 @@ func newReadActorStatesTool(novaDir string) (tool.BaseTool, error) {
 }
 
 func newWriteActorStatesTool(novaDir string) (tool.BaseTool, error) {
-	return utils.InferTool("write_actor_states", "批量创建、更新或删除状态系统。create/update 必须写完整 actor_state.templates、actor_state.trait_pools 和 initial_actors。模板是 Actor 状态 schema；templates[].trait_rules 只能引用存在的 pool_id，draw_count 必须为正且不超过池内词条数。词条只写 id、name、summary、weight、visibility，禁止写 ops、路径或 StateOp。主角、重要角色、敌人和怪物均在 Actor 创建时由后端应用模板默认值、实例覆盖值并自动抽取词条快照；initial_actors 仅声明开局就存在的 Actor。当前时间、地点、事件、资源、关系数值、持续状态、规则标记，以及会影响后续承接或规则检定的结构化状态都放进状态系统；普通叙事记录和场景流水只保留在 Turn 历史。字段 path 不要带 actors.<actor_id>.state 前缀，只写模板内字段路径，例如 crisis.countdown。删除内置状态系统会恢复内置版本；删除自定义状态系统必须来自用户明确指令。", func(ctx context.Context, input actorStateWriteInput) (string, error) {
+	return utils.InferTool("write_actor_states", "批量创建、更新或删除状态系统。create/update 必须写完整 actor_state.templates、actor_state.trait_pools 和 initial_actors。模板是 Actor 状态 schema；templates[].trait_rules 只能引用存在的 pool_id，draw_count 必须为正且不超过池内词条数。词条只写 id、name、summary、weight，禁止写 ops、路径或 StateOp。主角、重要角色、敌人和怪物均在 Actor 创建时由后端应用模板默认值、实例覆盖值并自动抽取词条快照；initial_actors 仅声明开局就存在的 Actor。当前时间、地点、事件、资源、关系数值、持续状态、规则标记，以及会影响后续承接或规则检定的结构化状态都放进状态系统；普通叙事记录和场景流水只保留在 Turn 历史。字段 path 不要带 actors.<actor_id>.state 前缀，只写模板内字段路径，例如 crisis.countdown。删除内置状态系统会恢复内置版本；删除自定义状态系统必须来自用户明确指令。", func(ctx context.Context, input actorStateWriteInput) (string, error) {
 		_ = ctx
 		if novaDir == "" {
 			return "", fmt.Errorf("nova_dir 不可用，无法写入状态系统")
@@ -687,7 +687,7 @@ func newListStoryDirectorsTool(novaDir string) (tool.BaseTool, error) {
 }
 
 func newReadStoryDirectorsTool(novaDir string) (tool.BaseTool, error) {
-	return utils.InferTool("read_story_directors", "按故事导演 ID 批量读取完整配置。故事导演是游戏模式独占模块；module_refs 决定引用哪些模块，event_package_ids 可引用多个事件包，rule_system_id 引用一个 TRPG 检定资源，actor_state_id 引用状态系统，*_disabled=true 表示对应模块关闭且保留原 ID 以便重新启用。状态系统的 trait_pools 是通用词条库，模板 trait_rules 决定各类 Actor 创建时从哪些池抽取多少词条。TRPG 资源只配置一项 rule_templates[0]，检定固定 d20，支持 trigger、must_check_examples、skip_check_examples、difficulty_guidance、state_effect_guidance 和 state_bindings；带 state_bindings 的 TRPG 资源需要 actor_state_id。strategy 使用枚举：mainline_strength=soft_guidance/balanced/strong_arc，failure_policy=reversible/consequence/fail_forward，pacing_curve=progressive/wave/goal-pressure-payoff，event_frequency=off/sparse/balanced/frequent，state_schema_adaptation_mode=after_opening/off，rule_state_consumption_mode=hybrid_auto/director_only，rule_visibility_mode=audit_only/public_roll；branch_planning_turns 控制最近分支规划回合数；planning_templates.plan 是单份 director.md Markdown 模板；strategy.prompt_markdown 是纯 Markdown 高级策略提示，最多 64KB。", func(ctx context.Context, input idListInput) (string, error) {
+	return utils.InferTool("read_story_directors", "按故事导演 ID 批量读取完整配置。故事导演是游戏模式独占模块；module_refs 决定引用哪些模块，event_package_ids 可引用多个事件包，rule_system_id 引用一个 TRPG 检定资源，actor_state_id 引用状态系统，*_disabled=true 表示对应模块关闭且保留原 ID 以便重新启用。状态系统的 trait_pools 是通用词条库，模板 trait_rules 决定各类 Actor 创建时从哪些池抽取多少词条。TRPG 资源只配置一项 rule_templates[0]，检定固定 d20，支持 trigger、must_check_examples、skip_check_examples、difficulty_guidance、state_effect_guidance 和 state_bindings；带 state_bindings 的 TRPG 资源需要 actor_state_id。strategy 使用枚举：mainline_strength=soft_guidance/balanced/strong_arc，failure_policy=reversible/consequence/fail_forward，pacing_curve=progressive/wave/goal-pressure-payoff，event_frequency=off/sparse/balanced/frequent，rule_state_consumption_mode=hybrid_auto/director_only，rule_visibility_mode=audit_only/public_roll；branch_planning_turns 控制最近分支规划回合数；状态结构策略由故事开局配置，不属于 Director strategy；planning_templates.plan 是单份 director.md Markdown 模板；strategy.prompt_markdown 是纯 Markdown 高级策略提示，最多 64KB。", func(ctx context.Context, input idListInput) (string, error) {
 		_ = ctx
 		if novaDir == "" {
 			return "", fmt.Errorf("nova_dir 不可用，无法读取故事导演")
@@ -710,7 +710,7 @@ func newReadStoryDirectorsTool(novaDir string) (tool.BaseTool, error) {
 }
 
 func newWriteStoryDirectorsTool(novaDir string) (tool.BaseTool, error) {
-	return utils.InferTool("write_story_directors", "批量创建、更新或删除故事导演配置。故事导演通过 module_refs 可插拔组合叙事风格、多个事件包、TRPG 检定、状态系统和图像方案；用 narrative_style_disabled、event_packages_disabled、rule_system_disabled、actor_state_disabled、image_preset_disabled 关闭模块，关闭时保留对应 ID。Actor 词条库和模板抽取规则通过 write_actor_states 更新。事件包引用写 event_package_ids；TRPG 检定引用写 rule_system_id；带 state_bindings 的 TRPG 检定资源必须配置 actor_state_id；状态系统引用写 actor_state_id。strategy 使用枚举：mainline_strength=soft_guidance/balanced/strong_arc，failure_policy=reversible/consequence/fail_forward，pacing_curve=progressive/wave/goal-pressure-payoff，event_frequency=off/sparse/balanced/frequent，state_schema_adaptation_mode=after_opening/off 默认 after_opening，rule_state_consumption_mode=hybrid_auto/director_only 默认 hybrid_auto，rule_visibility_mode=audit_only/public_roll 默认 audit_only；branch_planning_turns 默认 5；planning_templates.plan 可写单份 director.md Markdown 模板并必须保留固定标题；strategy.prompt_markdown 可写纯 Markdown 高级策略提示，最多 64KB，不能覆盖结构化策略、工具权限和输出协议。删除内置故事导演会被后端拒绝；删除必须来自用户明确指令。", func(ctx context.Context, input storyDirectorWriteInput) (string, error) {
+	return utils.InferTool("write_story_directors", "批量创建、更新或删除故事导演配置。故事导演通过 module_refs 可插拔组合叙事风格、多个事件包、TRPG 检定、状态系统和图像方案；用 narrative_style_disabled、event_packages_disabled、rule_system_disabled、actor_state_disabled、image_preset_disabled 关闭模块，关闭时保留原 ID。Actor 词条库和模板抽取规则通过 write_actor_states 更新。事件包引用写 event_package_ids；TRPG 检定引用写 rule_system_id；带 state_bindings 的 TRPG 检定资源必须配置 actor_state_id；状态系统引用写 actor_state_id。strategy 使用枚举：mainline_strength=soft_guidance/balanced/strong_arc，failure_policy=reversible/consequence/fail_forward，pacing_curve=progressive/wave/goal-pressure-payoff，event_frequency=off/sparse/balanced/frequent，rule_state_consumption_mode=hybrid_auto/director_only 默认 hybrid_auto，rule_visibility_mode=audit_only/public_roll 默认 audit_only；branch_planning_turns 默认 5；状态结构策略由故事开局配置，不属于 Director strategy；planning_templates.plan 可写单份 director.md Markdown 模板并必须保留固定标题；strategy.prompt_markdown 可写纯 Markdown 高级策略提示，最多 64KB，不能覆盖结构化策略、工具权限和输出协议。删除内置故事导演会被后端拒绝；删除必须来自用户明确指令。", func(ctx context.Context, input storyDirectorWriteInput) (string, error) {
 		_ = ctx
 		if novaDir == "" {
 			return "", fmt.Errorf("nova_dir 不可用，无法写入故事导演")
@@ -783,7 +783,7 @@ func newReadAutomationsTool(novaDir, workspace string, workspaces []string) (too
 }
 
 func newWriteAutomationsTool(novaDir, workspace string, workspaces []string) (tool.BaseTool, error) {
-	return utils.InferTool("write_automations", "批量创建、更新或删除用户自动化任务；create 必须显式指定 target，update/delete 使用 catalog_id。删除必须来自用户明确指令。", func(ctx context.Context, input automationWriteInput) (string, error) {
+	return utils.InferTool("write_automations", "批量创建、更新或删除用户自动化任务；create 必须显式指定 target，update 必须携带 read_automations 返回的 revision，update/delete 使用 catalog_id。删除必须来自用户明确指令。", func(ctx context.Context, input automationWriteInput) (string, error) {
 		_ = ctx
 		store := configManagerAutomationStore(novaDir, workspace, workspaces)
 		result := map[string][]string{"created": []string{}, "updated": []string{}, "deleted": []string{}}
@@ -800,7 +800,11 @@ func newWriteAutomationsTool(novaDir, workspace string, workspaces []string) (to
 				result["created"] = append(result["created"], task.CatalogID)
 			case "update":
 				id := firstConfigNonEmpty(op.ID, op.Task.ID)
-				task, err := store.Update(id, op.Task)
+				baseRevision := strings.TrimSpace(op.Task.Revision)
+				if baseRevision == "" {
+					return "", fmt.Errorf("自动化操作 #%d update %q 缺少 revision，请先用 read_automations 读取最新配置", i+1, id)
+				}
+				task, err := store.UpdateIfRevision(id, op.Task, baseRevision)
 				if err != nil {
 					return "", fmt.Errorf("自动化操作 #%d update %q 配置无效: %w", i+1, id, err)
 				}

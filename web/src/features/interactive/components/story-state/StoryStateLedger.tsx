@@ -1,27 +1,33 @@
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { AlertCircle, ChevronDown, ChevronUp, CircleCheck, Globe2, Loader2, PanelRight, Sparkles } from 'lucide-react'
+import { useEffect, useMemo, useState } from 'react'
+import { AlignLeft, AlertCircle, ChevronDown, ChevronUp, CircleCheck, Gauge, Globe2, Loader2, Package, PanelRight, Sparkles, Tag } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia } from '@/components/ui/empty'
-import { Progress } from '@/components/ui/progress'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { cn } from '@/lib/utils'
-import type { ActorStateField, Snapshot } from '../../types'
-import { StateValue } from '../director-console/shared'
+import type { Snapshot } from '../../types'
+import { ChangesSummary } from './ChangesSummary'
+import { ActorArchiveList } from './ActorArchiveList'
 import type { StoryStateDisplayPreference } from './display-preference'
-import { StateDisplayPreferenceMenu } from './StateDisplayPreferenceMenu'
+import { applyStoryStateLayout, readStoryStateLayouts, writeStoryStateTemplateLayout, type StoryStateLayouts, type StoryStateTemplateLayout } from './layout-preference'
+import { LedgerFieldView } from './ledger-fields'
 import {
   actorFieldEntries,
   actorName,
   actorTemplate,
+  actorTraits,
+  buildLedgerGroups,
   buildStoryStateModel,
   humanizeStateKey,
-  statePathLabel,
-  visibleActorTraits,
+  splitLedgerGroupsForPreview,
+  type LedgerFieldEntry,
+  type LedgerFieldGroup,
+  type ActorStateEntry,
   type StoryStateChange,
 } from './model'
+import { StateDisplayPreferenceMenu } from './StateDisplayPreferenceMenu'
+import { StateLayoutEditor } from './StateLayoutEditor'
 
 const WORLD_STATE_TAB = '__world_state__'
 
@@ -34,23 +40,6 @@ const PANEL_MODE_BY_PREFERENCE: Record<StoryStateDisplayPreference, StoryStatePa
   'director-only': 'collapsed',
 }
 
-type ActorFieldEntry = ReturnType<typeof actorFieldEntries>[number]
-type BoundedNumericFieldEntry = ActorFieldEntry & {
-  field: ActorStateField & { min: number; max: number }
-  value: number
-}
-type StateFieldLayout = 'compact' | 'wide' | 'structured'
-
-interface LedgerStateField {
-  id: string
-  label: string
-  value: unknown
-  fieldPath: string
-  numeric: boolean
-  changes: StoryStateChange[]
-  layout: StateFieldLayout
-}
-
 interface StoryStateLedgerProps {
   snapshot: Snapshot | null
   displayPreference: StoryStateDisplayPreference
@@ -58,57 +47,66 @@ interface StoryStateLedgerProps {
   onOpenDirectorState?: () => void
 }
 
+interface StateLedgerPresentation {
+  id: string
+  name: string
+  templateId: string
+  groups: LedgerFieldGroup[]
+  traits: ReturnType<typeof actorTraits>
+}
+
+/**
+ * StoryStateLedger is the compact state panel pinned after the latest prose.
+ * Fields lay out as bordered group sections on one page. Schema hints provide
+ * the fallback grouping, while a story + template UI preference controls the
+ * final section and field order. Preview mode shows the first two ordered
+ * sections with a "show all" affordance; the turn's state delta surfaces once in the
+ * summary row plus per-field change chips.
+ */
 export function StoryStateLedger({ snapshot, displayPreference, onDisplayPreferenceChange, onOpenDirectorState }: StoryStateLedgerProps) {
   const { t } = useTranslation()
   const model = useMemo(() => buildStoryStateModel(snapshot), [snapshot])
-  const actorTabs = useMemo(() => model.actors.map(([actorId, actor]) => ({ id: actorId, name: actorName(actorId, actor) })), [model.actors])
+  const actorLedgers = useMemo(() => model.actors.map(([actorId, actor]) => buildActorLedger(actorId, actor, snapshot, model.changes)), [model.actors, model.changes, snapshot])
+  const worldLedger = useMemo(() => buildWorldLedger(model.worldFacts, model.changes), [model.changes, model.worldFacts])
+  const allActors = useMemo<ActorStateEntry[]>(() => [
+    ...model.actors,
+    ...model.archivedActors.map((entry): ActorStateEntry => [entry.actorId, { name: entry.name, template_id: entry.templateId }]),
+  ], [model.actors, model.archivedActors])
+  const actorTabs = useMemo(() => actorLedgers.map((ledger) => ({ id: ledger.id, name: ledger.name })), [actorLedgers])
+  const hasWorldFacts = model.worldFacts.length > 0
   const [selectedTab, setSelectedTab] = useState(actorTabs[0]?.id || WORLD_STATE_TAB)
+  const storyId = snapshot?.story_id || ''
+  const [layoutState, setLayoutState] = useState<{ storyId: string; layouts: StoryStateLayouts }>(() => ({ storyId, layouts: readStoryStateLayouts(storyId) }))
+  const [layoutEditorOpen, setLayoutEditorOpen] = useState(false)
   const turnKey = `${snapshot?.story_id || ''}:${snapshot?.branch_id || ''}:${snapshot?.current_turn?.id || ''}`
   const [panelMode, setPanelMode] = useState<StoryStatePanelMode>(PANEL_MODE_BY_PREFERENCE[displayPreference])
-  const [previewOverflowing, setPreviewOverflowing] = useState(false)
-  const previewViewportRef = useRef<HTMLDivElement>(null)
-  const previewContentRef = useRef<HTMLDivElement>(null)
-  const contentId = useId()
+  const layouts = layoutState.storyId === storyId ? layoutState.layouts : {}
+  const selectedLedger = selectedTab === WORLD_STATE_TAB
+    ? worldLedger
+    : actorLedgers.find((ledger) => ledger.id === selectedTab)
 
   useEffect(() => {
-    if (selectedTab === WORLD_STATE_TAB || actorTabs.some((actor) => actor.id === selectedTab)) return
+    if (selectedTab === WORLD_STATE_TAB && hasWorldFacts) return
+    if (actorTabs.some((actor) => actor.id === selectedTab)) return
     setSelectedTab(actorTabs[0]?.id || WORLD_STATE_TAB)
-  }, [actorTabs, selectedTab])
+  }, [actorTabs, hasWorldFacts, selectedTab])
 
   useEffect(() => {
     setPanelMode(PANEL_MODE_BY_PREFERENCE[displayPreference])
   }, [displayPreference, turnKey])
 
-  useLayoutEffect(() => {
-    if (panelMode !== 'preview') {
-      setPreviewOverflowing(false)
-      return
-    }
-
-    const viewport = previewViewportRef.current
-    const content = previewContentRef.current
-    if (!viewport || !content) return
-
-    const updateOverflow = () => {
-      setPreviewOverflowing(content.scrollHeight > viewport.clientHeight + 1)
-    }
-
-    updateOverflow()
-    if (typeof ResizeObserver === 'undefined') return
-    const observer = new ResizeObserver(updateOverflow)
-    observer.observe(viewport)
-    observer.observe(content)
-    return () => observer.disconnect()
-  }, [panelMode, selectedTab, turnKey])
+  useEffect(() => {
+    setLayoutState({ storyId, layouts: readStoryStateLayouts(storyId) })
+    setLayoutEditorOpen(false)
+  }, [storyId])
 
   if (!model.hasState || displayPreference === 'director-only') return null
 
   const collapsed = panelMode === 'collapsed'
-  const open = !collapsed
 
   return (
     <Collapsible
-      open={open}
+      open={!collapsed}
       onOpenChange={(nextOpen) => setPanelMode(nextOpen ? 'preview' : 'collapsed')}
       asChild
     >
@@ -117,13 +115,18 @@ export function StoryStateLedger({ snapshot, displayPreference, onDisplayPrefere
         data-state-panel-mode={panelMode}
         className="story-state-ledger mt-3 overflow-hidden rounded-xl border border-[var(--nova-border)] bg-[var(--story-state-canvas)]"
       >
-        <header className="flex h-11 min-w-0 items-center gap-2 border-b border-[var(--nova-border)] px-2.5">
+        <header className="flex h-10 min-w-0 items-center gap-2 px-2.5">
           <StatusIndicator status={snapshot?.current_turn?.state_status} />
           <div className="flex min-w-0 flex-1 items-baseline gap-2">
             <h2 className="shrink-0 text-[13px] font-semibold tracking-tight text-[var(--nova-text)]">{t('storyStage.state.current')}</h2>
             <p className="min-w-0 truncate text-[11px] text-[var(--nova-text-faint)]">{turnStatusLabel(snapshot, t)}</p>
           </div>
-          <StateDisplayPreferenceMenu value={displayPreference} onChange={onDisplayPreferenceChange} compact />
+          <StateDisplayPreferenceMenu
+            value={displayPreference}
+            onChange={onDisplayPreferenceChange}
+            onCustomizeLayout={selectedLedger?.groups.length ? () => setLayoutEditorOpen(true) : undefined}
+            compact
+          />
           {onOpenDirectorState ? (
             <Button
               type="button"
@@ -151,65 +154,67 @@ export function StoryStateLedger({ snapshot, displayPreference, onDisplayPrefere
         </header>
 
         <CollapsibleContent>
-          <div className="story-state-ledger__content-shell" data-panel-mode={panelMode}>
-            <div
-              ref={previewViewportRef}
-              id={contentId}
-              className="story-state-ledger__content-viewport"
-            >
-              <div ref={previewContentRef} className="story-state-ledger__content">
-                <Tabs value={selectedTab} onValueChange={setSelectedTab} className="gap-0">
-                  <StateEntityTabs actors={actorTabs} />
-                  {model.actors.map(([actorId, actor]) => (
-                    <TabsContent key={actorId} value={actorId} className="mt-0">
-                      <ActorLedger
-                        actor={actor}
-                        snapshot={snapshot}
-                        changes={model.changes.filter((change) => change.actorId === actorId)}
-                      />
-                    </TabsContent>
-                  ))}
-                  <TabsContent value={WORLD_STATE_TAB} className="mt-0">
-                    <WorldLedger
-                      facts={model.worldFacts}
-                      changes={model.changes.filter((change) => !change.actorId)}
-                    />
-                  </TabsContent>
-                </Tabs>
-              </div>
-            </div>
-            {panelMode === 'preview' && previewOverflowing ? (
-              <div className="story-state-ledger__preview-action">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  aria-controls={contentId}
-                  aria-expanded="false"
-                  onClick={() => setPanelMode('expanded')}
+          {model.changes.length > 0 ? (
+            <ChangesSummary changes={model.changes} actors={allActors} schema={snapshot?.actor_state_schema} />
+          ) : null}
+          {actorLedgers.length > 0 || hasWorldFacts ? (
+            <Tabs value={selectedTab} onValueChange={setSelectedTab} className="gap-0">
+              <StateEntityTabs actors={actorTabs} showWorld={hasWorldFacts} />
+              {actorLedgers.map((ledger) => (
+                <TabsContent
+                  key={ledger.id}
+                  value={ledger.id}
+                  forceMount
+                  hidden={selectedTab !== ledger.id}
+                  className="mt-0"
                 >
-                  <ChevronDown data-icon="inline-start" />
-                  {t('storyStage.state.expandAll')}
-                </Button>
-              </div>
-            ) : null}
-            {panelMode === 'expanded' ? (
-              <div className="story-state-ledger__expanded-action">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  aria-controls={contentId}
-                  aria-expanded="true"
-                  onClick={() => setPanelMode('preview')}
+                  <ActorLedgerBody
+                    ledger={ledger}
+                    layout={layouts[ledger.templateId]}
+                    panelMode={panelMode === 'expanded' ? 'expanded' : 'preview'}
+                    onPanelModeChange={setPanelMode}
+                  />
+                </TabsContent>
+              ))}
+              {hasWorldFacts ? (
+                <TabsContent
+                  value={WORLD_STATE_TAB}
+                  forceMount
+                  hidden={selectedTab !== WORLD_STATE_TAB}
+                  className="mt-0"
                 >
-                  <ChevronUp data-icon="inline-start" />
-                  {t('storyStage.state.collapseToPreview')}
-                </Button>
-              </div>
-            ) : null}
-          </div>
+                  <WorldLedgerBody
+                    ledger={worldLedger}
+                    layout={layouts[worldLedger.templateId]}
+                    panelMode={panelMode === 'expanded' ? 'expanded' : 'preview'}
+                    onPanelModeChange={setPanelMode}
+                  />
+                </TabsContent>
+              ) : null}
+            </Tabs>
+          ) : null}
+          <ActorArchiveList entries={model.archivedActors} />
         </CollapsibleContent>
+        {selectedLedger ? (
+          <StateLayoutEditor
+            open={layoutEditorOpen}
+            title={selectedLedger.id === WORLD_STATE_TAB ? t('storyStage.state.world') : selectedLedger.name}
+            groups={selectedLedger.groups}
+            value={layouts[selectedLedger.templateId]}
+            onOpenChange={setLayoutEditorOpen}
+            onChange={(layout) => {
+              const next = { ...layouts, [selectedLedger.templateId]: layout }
+              setLayoutState({ storyId, layouts: next })
+              writeStoryStateTemplateLayout(storyId, selectedLedger.templateId, layout)
+            }}
+            onReset={() => {
+              const next = { ...layouts }
+              delete next[selectedLedger.templateId]
+              setLayoutState({ storyId, layouts: next })
+              writeStoryStateTemplateLayout(storyId, selectedLedger.templateId, null)
+            }}
+          />
+        ) : null}
       </section>
     </Collapsible>
   )
@@ -250,10 +255,11 @@ function StatusIndicator({ status }: { status?: 'pending' | 'ready' | 'failed' }
   )
 }
 
-function StateEntityTabs({ actors }: { actors: Array<{ id: string; name: string }> }) {
+function StateEntityTabs({ actors, showWorld }: { actors: Array<{ id: string; name: string }>; showWorld: boolean }) {
   const { t } = useTranslation()
+  if (actors.length <= 1 && !showWorld) return null
   return (
-    <div className="story-state-ledger__tabs-scroll overflow-x-auto overflow-y-hidden border-b border-[var(--nova-border)] px-2.5 py-1.5">
+    <div className="story-state-ledger__tabs-scroll overflow-x-auto overflow-y-hidden px-2.5 pb-1.5">
       <TabsList
         aria-label={t('storyStage.state.tabs')}
         className="story-state-ledger__tabs-list w-max max-w-none justify-start"
@@ -268,96 +274,168 @@ function StateEntityTabs({ actors }: { actors: Array<{ id: string; name: string 
             <span className="truncate">{actor.name}</span>
           </TabsTrigger>
         ))}
-        <TabsTrigger
-          value={WORLD_STATE_TAB}
-          className="min-w-20 flex-none"
-        >
-          <Globe2 data-icon="inline-start" />
-          <span>{t('storyStage.state.world')}</span>
-        </TabsTrigger>
+        {showWorld ? (
+          <TabsTrigger
+            value={WORLD_STATE_TAB}
+            className="min-w-20 flex-none"
+          >
+            <Globe2 data-icon="inline-start" />
+            <span>{t('storyStage.state.world')}</span>
+          </TabsTrigger>
+        ) : null}
       </TabsList>
     </div>
   )
 }
 
-function ActorLedger({ actor, snapshot, changes }: { actor: Record<string, unknown>; snapshot: Snapshot | null; changes: StoryStateChange[] }) {
-  const { t } = useTranslation()
+function buildActorLedger(actorId: string, actor: Record<string, unknown>, snapshot: Snapshot | null, changes: StoryStateChange[]): StateLedgerPresentation {
   const template = actorTemplate(actor, snapshot?.actor_state_schema)
-  const fields = actorFieldEntries(actor, template?.fields)
-  const traits = visibleActorTraits(actor)
-  const metricFields = fields.filter(isBoundedNumericFieldEntry)
-  const detailFields = fields.filter((entry) => !isBoundedNumericFieldEntry(entry))
-  const ledgerFields = detailFields.map(({ field, value }): LedgerStateField => {
-    const resolvedValue = value ?? field.default ?? null
-    const fieldPath = actorFieldPaths(field)[0] || field.name
-    const fieldChanges = actorFieldChanges(changes, field)
-    return {
-      id: field.id || field.path || field.name,
-      label: field.name,
-      value: resolvedValue,
-      fieldPath,
-      numeric: typeof resolvedValue === 'number',
-      changes: fieldChanges,
-      layout: stateFieldLayout(resolvedValue, fieldChanges),
+  const entries: LedgerFieldEntry[] = actorFieldEntries(actor, template?.fields).map(({ field, value }) => ({
+    id: field.id || field.path || field.name,
+    label: field.name,
+    field,
+    value: value ?? field.default ?? null,
+  }))
+  const rawTemplateId = typeof actor.template_id === 'string' ? actor.template_id.trim() : ''
+  return {
+    id: actorId,
+    name: actorName(actorId, actor),
+    templateId: template?.id || rawTemplateId || `actor:${actorId}`,
+    groups: buildLedgerGroups(entries, changes.filter((change) => change.actorId === actorId)),
+    traits: actorTraits(actor),
+  }
+}
+
+function buildWorldLedger(facts: Array<[string, unknown]>, changes: StoryStateChange[]): StateLedgerPresentation {
+  // Record-valued facts (e.g. the story-context object) are exploded one
+  // level so each nested value routes to its own renderer and group instead
+  // of flattening into one unreadable mega-row.
+  const entries: LedgerFieldEntry[] = facts.flatMap(([key, value]) => {
+    if (isRecordValue(value)) {
+      return Object.entries(value).map(([nestedKey, nestedValue]) => ({
+        id: `${key}.${nestedKey}`,
+        label: humanizeStateKey(nestedKey),
+        value: nestedValue,
+      }))
     }
+    return [{ id: key, label: humanizeStateKey(key), value }]
   })
+  return {
+    id: WORLD_STATE_TAB,
+    name: 'world',
+    templateId: WORLD_STATE_TAB,
+    groups: buildLedgerGroups(entries, changes.filter((change) => !change.actorId)),
+    traits: [],
+  }
+}
+
+function ActorLedgerBody({ ledger, layout, panelMode, onPanelModeChange }: { ledger: StateLedgerPresentation; layout?: StoryStateTemplateLayout; panelMode: 'preview' | 'expanded'; onPanelModeChange: (mode: StoryStatePanelMode) => void }) {
+  const { t } = useTranslation()
+  const groups = applyStoryStateLayout(ledger.groups, layout)
 
   return (
     <div>
-      {traits.length > 0 ? <ActorTraits traits={traits} /> : null}
-      {metricFields.length > 0 ? <NumericStateMetrics entries={metricFields} changes={changes} /> : null}
-      {ledgerFields.length > 0 ? <StateFieldCollection items={ledgerFields} /> : null}
-      {metricFields.length === 0 && detailFields.length === 0 ? <StateSectionEmpty label={t('storyStage.state.actorEmpty')} /> : null}
+      {ledger.traits.length > 0 ? <ActorTraits traits={ledger.traits} /> : null}
+      {groups.length > 0
+        ? <LedgerSections groups={groups} mode={panelMode} onModeChange={onPanelModeChange} />
+        : <StateSectionEmpty label={t('storyStage.state.actorEmpty')} />}
     </div>
   )
 }
 
-function NumericStateMetrics({ entries, changes }: { entries: BoundedNumericFieldEntry[]; changes: StoryStateChange[] }) {
+function WorldLedgerBody({ ledger, layout, panelMode, onPanelModeChange }: { ledger: StateLedgerPresentation; layout?: StoryStateTemplateLayout; panelMode: 'preview' | 'expanded'; onPanelModeChange: (mode: StoryStatePanelMode) => void }) {
   const { t } = useTranslation()
+  const groups = applyStoryStateLayout(ledger.groups, layout)
+  if (groups.length === 0) return <StateSectionEmpty label={t('storyStage.state.worldEmpty')} />
+  return <LedgerSections groups={groups} mode={panelMode} onModeChange={onPanelModeChange} />
+}
+
+/**
+ * LedgerSections lays groups out as visually distinct blocks on one page. In
+ * preview mode only the first two ordered sections show, with a mode toggle that
+ * reveals the rest without any height-clamped tricks.
+ */
+function LedgerSections({ groups, mode, onModeChange }: { groups: LedgerFieldGroup[]; mode: 'preview' | 'expanded'; onModeChange: (mode: StoryStatePanelMode) => void }) {
+  const { t } = useTranslation()
+  const { preview, hidden } = useMemo(() => splitLedgerGroupsForPreview(groups), [groups])
+  const expanded = mode === 'expanded'
+  // Keep the already-visible preview sections anchored in place. Sections
+  // revealed by the user's action append after them even when their schema
+  // order originally placed them above the preview set.
+  const visibleGroups = expanded ? [...preview, ...hidden] : preview
+  const decorated = groups.length > 1
   return (
-    <div role="group" aria-label={t('storyStage.state.numericStatus')} className="story-state-ledger__metric-grid story-state-ledger__flow-grid">
-      {entries.map(({ field, value }) => (
-        <NumericStateMetric
-          key={field.id || field.path || field.name}
-          field={field}
-          value={value}
-          fieldPath={actorFieldPaths(field)[0] || field.name}
-          changes={actorFieldChanges(changes, field)}
-        />
+    <div className="story-state-ledger__sections">
+      {visibleGroups.map((group) => (
+        <LedgerSectionBlock key={group.key} group={group} decorated={decorated} />
       ))}
+      {!expanded && hidden.length > 0 ? (
+        <button
+          type="button"
+          className="story-state-ledger__mode-toggle"
+          onClick={() => onModeChange('expanded')}
+        >
+          <ChevronDown aria-hidden="true" className="size-3.5" />
+          {t('storyStage.state.expandAll', { count: hidden.length })}
+        </button>
+      ) : null}
+      {expanded && hidden.length > 0 ? (
+        <button
+          type="button"
+          className="story-state-ledger__mode-toggle"
+          onClick={() => onModeChange('preview')}
+        >
+          <ChevronUp aria-hidden="true" className="size-3.5" />
+          {t('storyStage.state.collapseToPreview')}
+        </button>
+      ) : null}
     </div>
   )
 }
 
-function NumericStateMetric({ field, value, fieldPath, changes }: { field: BoundedNumericFieldEntry['field']; value: number; fieldPath: string; changes: StoryStateChange[] }) {
+function LedgerSectionBlock({ group, decorated }: { group: LedgerFieldGroup; decorated: boolean }) {
   const { t } = useTranslation()
-  const progress = normalizedProgress(value, field.min, field.max)
-  const valueLabel = `${formatMetricNumber(value)} / ${formatMetricNumber(field.max)}`
+  const label = group.custom ? group.key : t(`storyStage.state.group.${group.key}`)
   return (
-    <section data-state-metric className="min-w-0 bg-[var(--story-state-panel)] px-2.5 py-1.5">
-      <div className="mb-1 flex min-w-0 items-baseline justify-between gap-2">
-        <h4 className="truncate text-[11px] font-medium text-[var(--nova-text-faint)]" title={field.name}>{field.name}</h4>
-        <span className="shrink-0 font-mono text-[11px] font-semibold tabular-nums text-[var(--nova-text)]">{valueLabel}</span>
-      </div>
-      <Progress
-        value={progress}
-        aria-label={t('storyStage.state.metricProgress', {
-          label: field.name,
-          value: formatMetricNumber(value),
-          min: formatMetricNumber(field.min),
-          max: formatMetricNumber(field.max),
-        })}
-        aria-valuetext={valueLabel}
-        className="story-state-ledger__metric-progress h-1.5"
-      />
-      <InlineFieldChanges changes={changes} fieldPath={fieldPath} numeric variant="metric" />
+    <section aria-label={label} data-decorated={decorated || undefined} className="story-state-ledger__section">
+      {decorated ? (
+        <header className="story-state-ledger__section-header">
+          <LedgerGroupIcon group={group} />
+          <h3 className="story-state-ledger__section-title">{label}</h3>
+          <span className="story-state-ledger__section-count">{group.fields.length}</span>
+        </header>
+      ) : null}
+      <LedgerGroupGrid group={group} />
     </section>
   )
 }
 
-function ActorTraits({ traits }: { traits: ReturnType<typeof visibleActorTraits> }) {
+function LedgerGroupIcon({ group }: { group: LedgerFieldGroup }) {
+  const className = 'story-state-ledger__section-icon'
+  if (group.custom) return <Tag aria-hidden="true" className={className} />
+  switch (group.key) {
+    case 'overview':
+      return <Gauge aria-hidden="true" className={className} />
+    case 'holdings':
+      return <Package aria-hidden="true" className={className} />
+    case 'details':
+      return <AlignLeft aria-hidden="true" className={className} />
+    default:
+      return <Tag aria-hidden="true" className={className} />
+  }
+}
+
+function LedgerGroupGrid({ group }: { group: LedgerFieldGroup }) {
   return (
-    <div className="flex min-w-0 flex-wrap gap-1 border-b border-[var(--nova-border)] bg-[var(--story-state-panel)] px-2.5 py-1.5">
+    <div className="story-state-ledger__grid" data-group={group.custom ? 'custom' : group.key}>
+      {group.fields.map((item) => <LedgerFieldView key={item.id} item={item} />)}
+    </div>
+  )
+}
+
+function ActorTraits({ traits }: { traits: ReturnType<typeof actorTraits> }) {
+  return (
+    <div className="flex min-w-0 flex-wrap gap-1 border-b border-[var(--nova-border-soft)] px-2.5 py-1.5">
       {traits.map((trait) => (
         <Badge
           key={`${trait.pool_id}:${trait.trait_id}`}
@@ -372,157 +450,6 @@ function ActorTraits({ traits }: { traits: ReturnType<typeof visibleActorTraits>
   )
 }
 
-function WorldLedger({ facts, changes }: { facts: Array<[string, unknown]>; changes: StoryStateChange[] }) {
-  const { t } = useTranslation()
-
-  if (facts.length === 0) return <StateSectionEmpty label={t('storyStage.state.worldEmpty')} />
-
-  const ledgerFields = facts.map(([key, value]): LedgerStateField => {
-    const fieldChanges = worldFieldChanges(changes, key)
-    return {
-      id: key,
-      label: humanizeStateKey(key),
-      value,
-      fieldPath: key,
-      numeric: typeof value === 'number',
-      changes: fieldChanges,
-      layout: stateFieldLayout(value, fieldChanges),
-    }
-  })
-
-  return <StateFieldCollection items={ledgerFields} />
-}
-
-function StateFieldCollection({ items }: { items: LedgerStateField[] }) {
-  const groups: Record<StateFieldLayout, LedgerStateField[]> = { compact: [], wide: [], structured: [] }
-  items.forEach((item) => groups[item.layout].push(item))
-
-  return (
-    <>
-      {(['compact', 'wide'] as const).map((layout) => groups[layout].length > 0 ? (
-        <div
-          key={layout}
-          data-state-field-group={layout}
-          className={cn(
-            'story-state-ledger__field-grid',
-            layout === 'compact' ? 'story-state-ledger__flow-grid' : 'story-state-ledger__stack-grid',
-          )}
-        >
-          {groups[layout].map((item) => <StateField key={item.id} item={item} />)}
-        </div>
-      ) : null)}
-      {groups.structured.length > 0 ? (
-        <StructuredStateTabs items={groups.structured} />
-      ) : null}
-    </>
-  )
-}
-
-function StructuredStateTabs({ items }: { items: LedgerStateField[] }) {
-  const { t } = useTranslation()
-  const [selectedTab, setSelectedTab] = useState(items[0]?.id || '')
-  const activeTab = items.some((item) => item.id === selectedTab) ? selectedTab : items[0]?.id || ''
-
-  return (
-    <Tabs value={activeTab} onValueChange={setSelectedTab} className="gap-0">
-      <div className="story-state-ledger__tabs-scroll overflow-x-auto overflow-y-hidden border-b border-[var(--nova-border-soft)] bg-[var(--story-state-panel)] px-3">
-        <TabsList
-          variant="line"
-          aria-label={t('storyStage.state.structuredTabs')}
-          className="story-state-ledger__subtabs-list h-8 w-max max-w-none justify-start p-0"
-        >
-          {items.map((item) => (
-            <TabsTrigger
-              key={item.id}
-              value={item.id}
-              title={item.label}
-              className="h-8 min-w-16 max-w-40 flex-none rounded-none px-2 text-[11px] after:bottom-0"
-            >
-              <span className="truncate">{item.label}</span>
-            </TabsTrigger>
-          ))}
-        </TabsList>
-      </div>
-      {items.map((item) => (
-        <TabsContent key={item.id} value={item.id} className="mt-0">
-          <div data-state-field-group="structured" className="story-state-ledger__structured-panel">
-            <StateField item={item} hideLabel />
-          </div>
-        </TabsContent>
-      ))}
-    </Tabs>
-  )
-}
-
-function StateField({ item, hideLabel = false }: { item: LedgerStateField; hideLabel?: boolean }) {
-  const { label, value, fieldPath, numeric, changes, layout } = item
-  return (
-    <section
-      aria-label={hideLabel ? label : undefined}
-      data-state-field
-      data-state-field-layout={layout}
-      className={cn(
-        'min-w-0 bg-[var(--story-state-panel)] transition-colors hover:bg-[var(--story-state-field-hover)]',
-        layout === 'compact' ? 'px-2.5 py-1.5' : 'px-3 py-2',
-      )}
-    >
-      <div className={cn(layout === 'compact' && 'grid grid-cols-[minmax(64px,auto)_minmax(0,1fr)] items-baseline gap-3')}>
-        {hideLabel ? null : (
-          <h4 className={cn('truncate text-[11px] font-medium text-[var(--nova-text-faint)]', layout === 'wide' && 'mb-0.5')} title={label}>{label}</h4>
-        )}
-        <div className={cn('min-w-0', layout === 'compact' && 'text-right')}>
-          <StateValue value={value} />
-        </div>
-      </div>
-      <InlineFieldChanges changes={changes} fieldPath={fieldPath} numeric={numeric} />
-    </section>
-  )
-}
-
-function stateFieldLayout(value: unknown, changes: StoryStateChange[]): StateFieldLayout {
-  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
-    return 'structured'
-  }
-  if (Array.isArray(value)) {
-    return value.some((item) => typeof item === 'object' && item !== null) ? 'structured' : 'wide'
-  }
-
-  const simpleValueLength = typeof value === 'string'
-    ? value.trim().length
-    : 0
-  const usesWideLayout = simpleValueLength >= 20
-    || changes.some((change) => (change.reason?.trim().length || 0) >= 40)
-  return usesWideLayout ? 'wide' : 'compact'
-}
-
-function InlineFieldChanges({ changes, fieldPath, numeric, variant = 'field' }: { changes: StoryStateChange[]; fieldPath: string; numeric: boolean; variant?: 'field' | 'metric' }) {
-  const { t } = useTranslation()
-  if (changes.length === 0) return null
-  return (
-    <ul
-      aria-label={t('storyStage.state.fieldChanges')}
-      className={cn(
-        'flex flex-col gap-0.5',
-        variant === 'field' ? 'mt-1 border-l-2 border-[var(--nova-border)] pl-2' : 'mt-1',
-      )}
-    >
-      {changes.map((change) => {
-        const relativeLabel = relativeChangeLabel(change.path, fieldPath)
-        const tone = changeTone(change, numeric)
-        return (
-          <li key={change.id} className={cn('flex min-w-0 flex-wrap items-baseline gap-x-1.5', variant === 'field' ? 'text-[10px] leading-4' : 'text-[9px] leading-3.5')}>
-            {relativeLabel ? <span className="font-medium text-[var(--nova-text-muted)]">{relativeLabel}</span> : null}
-            <span className={cn('font-medium', tone === 'positive' && 'font-mono tabular-nums text-[var(--story-state-positive)]', tone === 'negative' && 'font-mono tabular-nums text-[var(--story-state-negative)]', tone === 'neutral' && 'text-[var(--nova-text-faint)]')}>
-              {inlineChangeLabel(change, numeric, t)}
-            </span>
-            {change.reason ? <span title={change.reason} className={cn('min-w-0 text-[var(--nova-text-faint)]', variant === 'field' ? 'line-clamp-2' : 'truncate')}>{change.reason}</span> : null}
-          </li>
-        )
-      })}
-    </ul>
-  )
-}
-
 function StateSectionEmpty({ label }: { label: string }) {
   return (
     <Empty className="min-h-20">
@@ -534,100 +461,16 @@ function StateSectionEmpty({ label }: { label: string }) {
   )
 }
 
-function isBoundedNumericFieldEntry(entry: ActorFieldEntry): entry is BoundedNumericFieldEntry {
-  return entry.field.type === 'number'
-    && typeof entry.value === 'number'
-    && Number.isFinite(entry.value)
-    && typeof entry.field.min === 'number'
-    && Number.isFinite(entry.field.min)
-    && typeof entry.field.max === 'number'
-    && Number.isFinite(entry.field.max)
-    && entry.field.max > entry.field.min
-}
-
-function normalizedProgress(value: number, min: number, max: number) {
-  return Math.min(100, Math.max(0, ((value - min) / (max - min)) * 100))
-}
-
-function formatMetricNumber(value: number) {
-  return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(2)))
-}
-
-function actorFieldChanges(changes: StoryStateChange[], field: ActorStateField) {
-  const paths = actorFieldPaths(field)
-  return changes.filter((change) => paths.some((path) => sameFieldPath(change.path, path)))
-}
-
-function actorFieldPaths(field: ActorStateField) {
-  return [field.id, field.path, field.name]
-    .filter((value): value is string => typeof value === 'string' && value.trim() !== '')
-}
-
-function sameFieldPath(left: string, right: string) {
-  const normalizedLeft = humanizeStateKey(left.trim()).toLocaleLowerCase()
-  const normalizedRight = humanizeStateKey(right.trim()).toLocaleLowerCase()
-  return normalizedLeft === normalizedRight
-}
-
-function worldFieldChanges(changes: StoryStateChange[], fieldPath: string) {
-  return changes.filter((change) => change.path === fieldPath || change.path.startsWith(`${fieldPath}.`))
-}
-
-function relativeChangeLabel(changePath: string, fieldPath: string) {
-  if (sameFieldPath(changePath, fieldPath)) return ''
-  const relative = changePath.startsWith(`${fieldPath}.`) ? changePath.slice(fieldPath.length + 1) : ''
-  return relative ? statePathLabel(relative) : ''
-}
-
-function changeTone(change: StoryStateChange, numeric: boolean): 'positive' | 'negative' | 'neutral' {
-  const op = change.op.trim().toLowerCase()
-  const delta = numericChangeDelta(change, numeric)
-  if (delta !== null) {
-    if (delta > 0) return 'positive'
-    if (delta < 0) return 'negative'
-  }
-  if (['push', 'append', 'add'].includes(op)) return 'positive'
-  if (['pull', 'remove', 'delete', 'unset'].includes(op)) return 'negative'
-  return 'neutral'
-}
-
-function inlineChangeLabel(change: StoryStateChange, numeric: boolean, t: ReturnType<typeof useTranslation>['t']) {
-  const op = change.op.trim().toLowerCase()
-  const delta = numericChangeDelta(change, numeric)
-  if (delta !== null) {
-    return `${delta >= 0 ? '+' : ''}${delta}`
-  }
-  const value = inlineValue(change.value)
-  if (['set', 'replace', 'merge'].includes(op)) return t('storyStage.state.changeUpdatedInline')
-  if (['push', 'append', 'add'].includes(op)) return value ? t('storyStage.state.changeAddInline', { value }) : t('storyStage.state.changeUpdatedInline')
-  if (['pull', 'remove', 'delete'].includes(op)) return value ? t('storyStage.state.changeRemoveInline', { value }) : t('storyStage.state.changeRemovedInline')
-  if (op === 'unset') return t('storyStage.state.changeRemovedInline')
-  return t('storyStage.state.changeUpdatedInline')
-}
-
-function isIncrementOperation(op: string) {
-  return op === 'inc' || op === 'increment' || op === 'decrement'
-}
-
-function numericChangeDelta(change: StoryStateChange, numeric: boolean) {
-  const op = change.op.trim().toLowerCase()
-  if (!numeric || !isIncrementOperation(op) || typeof change.value !== 'number') return null
-  return op === 'decrement' ? -Math.abs(change.value) : change.value
-}
-
-function inlineValue(value: unknown): string {
-  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value)
-  if (Array.isArray(value) && value.every((item) => item === null || ['string', 'number', 'boolean'].includes(typeof item))) {
-    return value.map((item) => item === null ? '' : String(item)).filter(Boolean).join('、')
-  }
-  return ''
-}
-
 function turnStatusLabel(snapshot: Snapshot | null, t: ReturnType<typeof useTranslation>['t']) {
   const turnId = snapshot?.current_turn?.id
-  const matchedIndex = turnId ? snapshot?.turns.findIndex((turn) => turn.id === turnId) ?? -1 : -1
-  const turn = matchedIndex >= 0 ? matchedIndex + 1 : Math.max(snapshot?.turns.length || 0, turnId ? 1 : 0)
+  const turns = snapshot?.turns || []
+  const matchedIndex = turnId ? turns.findIndex((turn) => turn.id === turnId) : -1
+  const turn = matchedIndex >= 0 ? matchedIndex + 1 : Math.max(turns.length, turnId ? 1 : 0)
   if (snapshot?.current_turn?.state_status === 'pending') return t('storyStage.state.syncing', { turn })
   if (snapshot?.current_turn?.state_status === 'failed') return t('storyStage.state.failed', { turn })
   return t('storyStage.state.updatedTurn', { turn })
+}
+
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }

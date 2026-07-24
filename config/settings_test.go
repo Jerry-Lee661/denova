@@ -22,6 +22,12 @@ func TestDefaultSettingsValues(t *testing.T) {
 	if s.AutoSaveEnabled == nil || *s.AutoSaveEnabled != true {
 		t.Fatalf("AutoSaveEnabled default")
 	}
+	if s.VersionTimedEnabled == nil || !*s.VersionTimedEnabled {
+		t.Fatalf("VersionTimedEnabled should default on")
+	}
+	if s.VersionTimedIntervalMinutes == nil || *s.VersionTimedIntervalMinutes != 10 {
+		t.Fatalf("VersionTimedIntervalMinutes should default to 10")
+	}
 	if s.HideChapterBodyLiveOutput == nil || *s.HideChapterBodyLiveOutput {
 		t.Fatalf("HideChapterBodyLiveOutput should default off")
 	}
@@ -57,6 +63,9 @@ func TestDefaultSettingsValues(t *testing.T) {
 	}
 	if s.AgentModels.ConfigManager.EnableThinking == nil || !*s.AgentModels.ConfigManager.EnableThinking {
 		t.Fatalf("ConfigManager thinking should default on")
+	}
+	if s.AgentModels.InteractiveStory.EnableThinking == nil || *s.AgentModels.InteractiveStory.EnableThinking {
+		t.Fatalf("InteractiveStory extended thinking should default off")
 	}
 	if s.AgentModels.ToolAgent.EnableThinking == nil || *s.AgentModels.ToolAgent.EnableThinking {
 		t.Fatalf("ToolAgent thinking should default off")

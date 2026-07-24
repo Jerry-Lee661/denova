@@ -14,13 +14,14 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import { subAgentSessionKey } from './subagent-session'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
-import { boundedPlanDisplay, formatPlanQuestionAnswerMessage, formatPlanQuestionAnswerPreview, parsePlanQuestionSet, recommendedAnswerSet } from '@/lib/plan-mode'
+import { formatPlanQuestionAnswerMessage, formatPlanQuestionAnswerPreview, parsePlanQuestionSet, planDisplayContent, recommendedAnswerSet } from '@/lib/plan-mode'
 import type { PlanQuestionAnswer } from '@/lib/plan-mode'
 import { Message as AIMessage, MessageContent as AIMessageContent } from '@/components/ai-elements/message'
 import { Reasoning, ReasoningContent, ReasoningTrigger } from '@/components/ai-elements/reasoning'
 import { Plan, PlanContent, PlanHeader } from '@/components/ai-elements/plan'
 import { Tool, ToolContent } from '@/components/ai-elements/tool'
 import { Shimmer } from '@/components/ai-elements/shimmer'
+import { StreamingContentStage } from './StreamingContentStage'
 
 interface MessageItemProps {
   message: ChatMessage
@@ -622,7 +623,7 @@ function ContextCompactionBlock({ message }: { message: ChatMessage }) {
 function PlanQuestionBlock({ message, onSubmit, onLayoutChange }: { message: ChatMessage; onSubmit?: (message: ChatMessage, content: string, preview: string) => void; onLayoutChange?: () => void }) {
   const { t } = useTranslation()
   const questionSet = parsePlanQuestionSet(message.content || '')
-  const fallback = boundedPlanDisplay(message.content || '')
+  const fallback = planDisplayContent(message.content || '')
   const [selected, setSelected] = useState<Record<string, string[]>>(() => questionSet ? recommendedAnswerSet(questionSet) : {})
   const [customAnswers, setCustomAnswers] = useState<Record<string, string>>({})
   const [questionIndex, setQuestionIndex] = useState(0)
@@ -660,7 +661,7 @@ function PlanQuestionBlock({ message, onSubmit, onLayoutChange }: { message: Cha
   if (!questionSet) {
     return (
       <PlanShell icon={<ClipboardList className="h-3.5 w-3.5" />} title={t('chat.plan.questionTitle')}>
-        <div className="max-h-72 overflow-auto whitespace-pre-wrap text-xs leading-relaxed text-[var(--nova-text-muted)]">{fallback.content}</div>
+        <div className="max-h-72 overflow-auto whitespace-pre-wrap text-xs leading-relaxed text-[var(--nova-text-muted)]">{fallback}</div>
       </PlanShell>
     )
   }
@@ -799,7 +800,7 @@ function PlanQuestionBlock({ message, onSubmit, onLayoutChange }: { message: Cha
 
 function ProposedPlanBlock({ message, highlightDialogue, onApprove, onContinue, onExit, onLayoutChange }: { message: ChatMessage; highlightDialogue?: boolean; onApprove?: (message: ChatMessage) => void; onContinue?: (message: ChatMessage) => void; onExit?: () => void; onLayoutChange?: () => void }) {
   const { t } = useTranslation()
-  const display = boundedPlanDisplay(message.content || '')
+  const display = planDisplayContent(message.content || '')
   const [localAction, setLocalAction] = useState<ChatMessage['plan_action']>(message.plan_action)
   const planAction = message.plan_action || localAction
   useEffect(() => {
@@ -816,9 +817,8 @@ function ProposedPlanBlock({ message, highlightDialogue, onApprove, onContinue, 
     <PlanShell icon={<ClipboardCheck className="h-3.5 w-3.5" />} title={t('chat.plan.proposalTitle')} badge={t('chat.plan.proposalBadge')}>
       <div className="flex max-h-[min(680px,calc(100vh-220px))] min-h-0 flex-col">
         <div className="chat-agent-message min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1 text-sm leading-6 text-[var(--nova-text)] [scrollbar-gutter:stable]">
-          <MarkdownContent content={display.content} highlightDialogue={highlightDialogue === true} />
+          <MarkdownContent content={display} highlightDialogue={highlightDialogue === true} />
         </div>
-        {display.truncated && <div className="mt-2 shrink-0 text-[11px] text-[var(--nova-text-faint)]">{t('chat.plan.displayTruncated')}</div>}
         {planAction ? (
           <PlanActionStatus text={planActionStatusText(t, planAction)} />
         ) : (
@@ -1528,6 +1528,14 @@ function isContentTool(name: string): boolean {
 
 /** 从不完整的 JSON args 中提取 content/new_string 字段的流式文本 */
 function extractStreamingContent(rawArgs: string): string {
+  try {
+    const parsed = JSON.parse(rawArgs) as Record<string, unknown>
+    for (const key of ['content', 'new_string']) {
+      if (typeof parsed[key] === 'string') return parsed[key]
+    }
+  } catch {
+    // 流式参数尚未形成完整 JSON 时继续按增量文本提取。
+  }
   // 尝试提取 "content": "..." 或 "new_string": "..."
   const match = rawArgs.match(/"(?:content|new_string)"\s*:\s*"([\s\S]*)$/m)
   if (!match) return ''
@@ -1539,10 +1547,6 @@ function extractStreamingContent(rawArgs: string): string {
   } catch {
     // 不完整时做简单转义还原
     text = text.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\"/g, '"').replace(/\\\\/g, '\\')
-  }
-  // 只展示最后 500 字符以保持性能
-  if (text.length > 500) {
-    return '...' + text.slice(-500)
   }
   return text
 }
@@ -1557,21 +1561,12 @@ function StreamingPlaceholder() {
   )
 }
 
-/** 流式 Markdown 由上层先提交 target 高度，随后再把 target 提升为可见 content。 */
+/** 流式 Markdown 与纯文本共用“预留目标高度后再揭示”的帧序。 */
 function StreamingMarkdown({ content, targetContent, highlightDialogue }: { content: string; targetContent?: string; highlightDialogue: boolean }) {
-  if (!targetContent || targetContent === content) {
-    return <MarkdownContent content={content} highlightDialogue={highlightDialogue} />
-  }
-
   return (
-    <div className="nova-streaming-markdown-stage">
-      <div className="nova-streaming-markdown-reserve" aria-hidden="true">
-        <MarkdownContent content={targetContent} highlightDialogue={highlightDialogue} />
-      </div>
-      <div className="nova-streaming-markdown-overlay">
-        <MarkdownContent content={content} highlightDialogue={highlightDialogue} />
-      </div>
-    </div>
+    <StreamingContentStage content={content} targetContent={targetContent} streaming>
+      {(value) => <MarkdownContent content={value} highlightDialogue={highlightDialogue} />}
+    </StreamingContentStage>
   )
 }
 
@@ -1691,14 +1686,17 @@ function highlightDialogueText(text: string, enabled: boolean, keyPrefix: string
   return <Fragment>{nodes}</Fragment>
 }
 
-/** 思考过程折叠块，流式思考中自动展开，结束后自动折叠。 */
+/** 思考过程折叠块：默认展开，流式结束后自动折叠。 */
 function ThinkingBlock({ message, content, streaming }: { message: ChatMessage; content: string; streaming: boolean }) {
   const { t } = useTranslation()
-  const [expanded, setExpanded] = useState(streaming)
+  const [expanded, setExpanded] = useState(true)
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     setExpanded(streaming)
   }, [streaming])
+
+  // 流式思考但内容尚未到达时，复用 Shimmer 显示“思考中...”，避免空白折叠块像卡死。
+  const showActivityShimmer = streaming && !content.trim()
 
   return (
     <div className="flex justify-start">
@@ -1706,11 +1704,17 @@ function ThinkingBlock({ message, content, streaming }: { message: ChatMessage; 
         <Reasoning isStreaming={streaming} open={expanded} onOpenChange={setExpanded} className="mb-0">
           <ReasoningTrigger className="flex items-center gap-1 py-1 text-xs text-[var(--nova-text-muted)] hover:text-[var(--nova-text)]">
             {expanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-            <span>{t('chat.trace.thinking')}</span>
+            {showActivityShimmer ? (
+              <Shimmer as="span" className="text-xs font-medium">{t('chat.activity.thinking')}</Shimmer>
+            ) : (
+              <span>{t('chat.trace.thinking')}</span>
+            )}
             {message.subagent && <AgentSourceBadge message={message} compact />}
           </ReasoningTrigger>
           <ReasoningContent className="mt-0 border-l border-[var(--nova-border)] px-3 py-2 text-xs text-[var(--nova-text-muted)] whitespace-pre-wrap">
-            {content}
+            <StreamingContentStage content={content} targetContent={streaming ? message.streaming_target_content : undefined} streaming={streaming}>
+              {(value) => value}
+            </StreamingContentStage>
           </ReasoningContent>
         </Reasoning>
       </div>

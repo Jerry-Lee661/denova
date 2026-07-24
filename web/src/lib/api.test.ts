@@ -6,6 +6,7 @@ import {
   executeCommand,
   getActiveChatTask,
   getMessages,
+  getMessagesPage,
   getSessions,
   getWorkspaceSummary,
   renameSession,
@@ -101,11 +102,32 @@ describe('api', () => {
     expect(requests).toEqual(['/api/session/messages?session_id=session-ui'])
   })
 
+  it('从最新消息向前分页读取会话展示历史', async () => {
+    let requestPath = ''
+    server.use(
+      http.get('/api/session/messages', ({ request }) => {
+        requestPath = new URL(request.url).pathname + new URL(request.url).search
+        return HttpResponse.json({
+          messages: [{ id: 'message-older', role: 'user', parts: [{ type: 'text', text: '更早消息' }] }],
+          page: { next_before: '25', has_more: true, total: 125 },
+        })
+      }),
+    )
+
+    await expect(getMessagesPage('session-ui', { limit: 50, before: '75' })).resolves.toEqual({
+      messages: [{ id: 'message-older', role: 'user', parts: [{ type: 'text', text: '更早消息' }] }],
+      nextBefore: '25',
+      hasMore: true,
+      total: 125,
+    })
+    expect(requestPath).toBe('/api/session/messages?session_id=session-ui&limit=50&before=75')
+  })
+
   it('发送命令时返回后端结果', async () => {
     await expect(executeCommand('status')).resolves.toBe('executed:status')
   })
 
-  it('保存 Skill 配置时可提交目标 scope 和名称', async () => {
+  it('保存 Skill 配置时可提交目标 scope、名称和基础 revision', async () => {
     let requestBody: unknown
     server.use(
       http.put('/api/skills/document', async ({ request }) => {
@@ -118,11 +140,12 @@ describe('api', () => {
           editable: true,
           active: true,
           content: '---\nname: beat-plan\ndescription: Beat planning\n---\n',
+          revision: 'skill-r2',
         })
       }),
     )
 
-    await expect(saveSkillDocument('user', 'draft-plan', 'content', { scope: 'workspace', name: 'beat-plan' })).resolves.toMatchObject({
+    await expect(saveSkillDocument('user', 'draft-plan', 'content', { scope: 'workspace', name: 'beat-plan' }, 'skill-r1')).resolves.toMatchObject({
       scope: 'workspace',
       name: 'beat-plan',
     })
@@ -132,6 +155,7 @@ describe('api', () => {
       content: 'content',
       target_scope: 'workspace',
       target_name: 'beat-plan',
+      base_revision: 'skill-r1',
     })
   })
 

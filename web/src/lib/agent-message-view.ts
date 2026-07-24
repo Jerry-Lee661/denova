@@ -63,14 +63,28 @@ export interface AgentTokenUsageRecord {
   usage_calls?: TokenUsageCall[]
 }
 
+// Agent message updates are immutable. Caching by message identity keeps
+// completed history stable while only the active streaming message is rebuilt.
+const messageViewsCache = new WeakMap<AgentUIMessage, AgentMessageView[]>()
+
 export function buildAgentMessageViews(messages: AgentUIMessage[]): AgentMessageView[] {
   const views: AgentMessageView[] = []
   messages.forEach((message) => {
-    if (message.role === 'user' && message.metadata?.display_hidden) return
-    message.parts.forEach((part, partIndex) => {
-      const view = buildAgentMessageView(message, part, partIndex)
-      if (view) views.push(view)
-    })
+    const cachedViews = messageViewsCache.get(message)
+    if (cachedViews) {
+      views.push(...cachedViews)
+      return
+    }
+
+    const messageViews: AgentMessageView[] = []
+    if (!(message.role === 'user' && message.metadata?.display_hidden)) {
+      message.parts.forEach((part, partIndex) => {
+        const view = buildAgentMessageView(message, part, partIndex)
+        if (view) messageViews.push(view)
+      })
+    }
+    messageViewsCache.set(message, messageViews)
+    views.push(...messageViews)
   })
   return views
 }
@@ -81,8 +95,27 @@ export function selectAgentTokenUsageRecords(messages: AgentUIMessage[]): AgentT
     .map(agentTokenUsageRecordFromView)
 }
 
+export function countCompletedAgentTurnSignals(messages: AgentUIMessage[]): number {
+  return buildAgentMessageViews(messages).filter((view) =>
+    (view.kind === 'assistant' || view.kind === 'tool-result' || view.kind === 'tool') &&
+    (Boolean(agentViewContent(view).trim()) || view.status === 'success'),
+  ).length
+}
+
+export function hasCompletedAgentTurn(messages: AgentUIMessage[], isStreaming: boolean): boolean {
+  return !isStreaming && countCompletedAgentTurnSignals(messages) > 0
+}
+
 export function agentViewContent(view: AgentMessageView) {
   return view.content || readString(view.data.content) || readString(view.data.message) || readString(view.data.error)
+}
+
+/** Content whose full height must be reserved for the next visible streaming frame. */
+export function agentViewLayoutContent(view: AgentMessageView) {
+  if (view.streaming && view.metadata.streaming_target_content !== undefined) {
+    return view.metadata.streaming_target_content
+  }
+  return agentViewContent(view)
 }
 
 export function agentViewNavigationAnchor(view: AgentMessageView) {

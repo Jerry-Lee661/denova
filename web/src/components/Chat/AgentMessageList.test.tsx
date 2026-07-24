@@ -14,6 +14,38 @@ function renderMessageList(ui: ReactElement) {
 }
 
 describe('Agent MessageList', () => {
+  it('在历史窗口顶部按需加载更早消息', () => {
+    const loadEarlier = vi.fn()
+    renderMessageList(
+      <MessageList
+        isStreaming={false}
+        activityContent=""
+        messages={agentTurnMessages()}
+        hasEarlierMessages
+        onLoadEarlierMessages={loadEarlier}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: '加载更早消息' }))
+    expect(loadEarlier).toHaveBeenCalledTimes(1)
+  })
+
+  it('前置更早消息时保持原首条消息的虚拟索引', () => {
+    const current = { id: 'current-message', role: 'assistant', parts: [{ type: 'text', text: '当前窗口首条' }] } as AgentUIMessage
+    const earlier = { id: 'earlier-message', role: 'user', parts: [{ type: 'text', text: '更早窗口消息' }] } as AgentUIMessage
+    const list = (messages: AgentUIMessage[]) => (
+      <VirtuosoMockContext.Provider value={{ viewportHeight: 180, itemHeight: 52 }}>
+        <MessageList isStreaming={false} activityContent="" messages={messages} scrollResetKey="session-a" />
+      </VirtuosoMockContext.Provider>
+    )
+    const { rerender } = render(list([current]))
+    const indexBefore = screen.getByText('当前窗口首条').closest('[data-item-index]')?.getAttribute('data-item-index')
+
+    rerender(list([earlier, current]))
+
+    expect(screen.getByText('当前窗口首条').closest('[data-item-index]')).toHaveAttribute('data-item-index', indexBefore)
+  })
+
   it('renders optional stage content after the latest message and before the composer spacer', () => {
     renderMessageList(
       <MessageList
@@ -32,12 +64,47 @@ describe('Agent MessageList', () => {
     expect(state.closest('[data-nova-chat-after-content]')?.nextElementSibling).toHaveAttribute('data-nova-chat-bottom-spacer')
   })
 
+  it('does not apply a compensating scroll after an idle stage interaction', () => {
+    const renderList = (afterContentKey: string) => (
+      <VirtuosoMockContext.Provider value={{ viewportHeight: 180, itemHeight: 52 }}>
+        <MessageList
+          isStreaming={false}
+          activityContent=""
+          messages={agentTurnMessages()}
+          afterContent={<button type="button">展开状态</button>}
+          afterContentKey={afterContentKey}
+        />
+      </VirtuosoMockContext.Provider>
+    )
+    const { container, rerender } = render(renderList('collapsed'))
+    const scroller = container.querySelector<HTMLElement>('.nova-chat-canvas')
+    if (!scroller) throw new Error('Expected message scroller')
+    let scrollHeight = 500
+    Object.defineProperty(scroller, 'scrollHeight', { configurable: true, get: () => scrollHeight })
+    Object.defineProperty(scroller, 'clientHeight', { configurable: true, get: () => 100 })
+    scroller.scrollTop = 400
+    fireEvent.scroll(scroller)
+
+    fireEvent.pointerDown(screen.getByRole('button', { name: '展开状态' }))
+    scrollHeight = 700
+    rerender(renderList('expanded'))
+
+    // Idle footer following is disabled at the virtualizer boundary. If a
+    // scroll event still occurs, the lock must not create a second visible
+    // jump by writing the previously captured position back afterward.
+    scroller.scrollTop = 600
+    fireEvent.scroll(scroller)
+
+    expect(scroller.scrollTop).toBe(600)
+  })
+
   it('有可见流式 thinking 时不再追加会被动态内容推动的活动卡片', () => {
     renderMessageList(
       <MessageList
         isStreaming
         activityContent="正在思考…"
         collapseTraceGroups
+        activeTraceDisplay="collapsed"
         messages={[
           {
             id: 'assistant-thinking',
@@ -50,7 +117,8 @@ describe('Agent MessageList', () => {
       />,
     )
 
-    expect(screen.getByText('正在分析当前剧情。')).toBeInTheDocument()
+    expect(screen.queryByText('正在分析当前剧情。')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /思考过程/ })).toHaveAttribute('aria-expanded', 'false')
     expect(screen.queryByText('正在思考…')).not.toBeInTheDocument()
   })
 
@@ -198,12 +266,13 @@ describe('Agent MessageList', () => {
     expect(screen.getByText('submit_actor_state_patches')).toBeInTheDocument()
   })
 
-  it('运行中的 trace 在工具结果返回后保持展开，结束后和工具调用一起折叠', async () => {
+  it('运行中的 trace 默认收起，用户展开后在流式更新中保持展开', async () => {
     const { rerender } = renderMessageList(
       <MessageList
         isStreaming
         activityContent=""
         collapseTraceGroups
+        activeTraceDisplay="collapsed"
         messages={[
           {
             id: 'assistant-running',
@@ -217,7 +286,13 @@ describe('Agent MessageList', () => {
       />,
     )
 
-    expect(screen.getByRole('button', { name: /思考过程.*1 次工具调用/ })).toBeInTheDocument()
+    const traceButton = screen.getByRole('button', { name: /思考过程.*1 次工具调用/ })
+    expect(traceButton).toHaveAttribute('aria-expanded', 'false')
+    expect(screen.queryByText('正在检查资料')).not.toBeInTheDocument()
+    expect(screen.queryByText('read_file')).not.toBeInTheDocument()
+
+    fireEvent.click(traceButton)
+    expect(traceButton).toHaveAttribute('aria-expanded', 'true')
     expect(screen.getByText('正在检查资料')).toBeInTheDocument()
     expect(screen.getByText('read_file')).toBeInTheDocument()
 
@@ -227,6 +302,7 @@ describe('Agent MessageList', () => {
           isStreaming
           activityContent=""
           collapseTraceGroups
+          activeTraceDisplay="collapsed"
           messages={[
             {
               id: 'assistant-running',
@@ -250,6 +326,7 @@ describe('Agent MessageList', () => {
           isStreaming={false}
           activityContent=""
           collapseTraceGroups
+          activeTraceDisplay="collapsed"
           messages={[
             {
               id: 'assistant-running',
@@ -265,12 +342,53 @@ describe('Agent MessageList', () => {
       </VirtuosoMockContext.Provider>,
     )
 
-    await waitFor(() => expect(screen.queryByText('正在检查资料')).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('正在检查资料')).toBeInTheDocument())
     expect(screen.getByText('资料检查完成。')).toBeInTheDocument()
+  })
 
-    fireEvent.click(screen.getByRole('button', { name: /思考过程.*1 次工具调用/ }))
-    expect(screen.getByText('正在检查资料')).toBeInTheDocument()
-    expect(screen.getByText('read_file')).toBeInTheDocument()
+  it('未指定展示策略时保留原有的运行中 trace 展开行为', () => {
+    renderMessageList(
+      <MessageList
+        isStreaming
+        activityContent=""
+        collapseTraceGroups
+        messages={[{
+          id: 'assistant-running-default',
+          role: 'assistant',
+          parts: [{ type: 'reasoning', text: '正在分析', state: 'streaming' }],
+        }] as AgentUIMessage[]}
+      />,
+    )
+
+    expect(screen.getByRole('button', { name: /思考过程/ })).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.getByText('正在分析')).toBeInTheDocument()
+  })
+
+  it('折叠 trace 的滚动检测不序列化大型工具输出', () => {
+    const toJSON = vi.fn(() => ({ payload: 'large result' }))
+
+    renderMessageList(
+      <MessageList
+        isStreaming
+        activityContent=""
+        collapseTraceGroups
+        activeTraceDisplay="collapsed"
+        messages={[{
+          id: 'assistant-tool-output',
+          role: 'assistant',
+          parts: [{
+            type: 'dynamic-tool',
+            toolName: 'read_file',
+            toolCallId: 'tool-output',
+            state: 'output-available',
+            input: { path: 'large.md' },
+            output: { toJSON },
+          }],
+        }] as AgentUIMessage[]}
+      />,
+    )
+
+    expect(toJSON).not.toHaveBeenCalled()
   })
 
   it('新一轮 streaming 不会重新展开历史 trace', async () => {

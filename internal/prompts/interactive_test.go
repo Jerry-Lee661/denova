@@ -33,38 +33,6 @@ func TestInteractivePromptsSkipLegacyCharacterAndWorldFallback(t *testing.T) {
 	}
 }
 
-func TestInteractiveStateSchemaAdapterSystemInstructionCoversSemanticAdaptation(t *testing.T) {
-	system := BuildInteractiveStateSchemaAdapterSystemInstruction()
-	for _, want := range []string{
-		"首轮正文原子落盘后",
-		"最小但充分",
-		"好感",
-		"境界",
-		"TRPG",
-		"生命",
-		"合法成年",
-		"不得只按题材关键词",
-		"protagonist",
-		"story_context",
-		"覆盖审查",
-		"list_lore_items",
-		"read_lore_items",
-		"submit_state_schema_adaptation",
-		"value_policy",
-		"actor_ops",
-		"语义重复",
-		"字段级 set",
-		"finalize 前不生效",
-	} {
-		if !strings.Contains(system, want) {
-			t.Fatalf("state schema adapter prompt missing %q:\n%s", want, system)
-		}
-	}
-	if strings.Contains(system, "只输出一个 JSON object") {
-		t.Fatalf("state schema adapter should submit through its tool instead of returning raw JSON:\n%s", system)
-	}
-}
-
 func TestInteractiveStoryPromptUsesDirectNarrativeOutputContract(t *testing.T) {
 	system := BuildInteractiveStorySystemInstruction(InteractiveStorySystemInstructionInput{
 		ReplyTargetChars: 600,
@@ -106,6 +74,77 @@ func TestInteractiveStoryPromptUsesDirectNarrativeOutputContract(t *testing.T) {
 	for _, forbidden := range []string{"优先引用对应事件卡", "type_name/name"} {
 		if strings.Contains(system, forbidden) {
 			t.Fatalf("system prompt should not ask prose agent to trigger raw event cards %q:\n%s", forbidden, system)
+		}
+	}
+}
+
+func TestInteractiveStoryPromptKeepsThinkingToPlanningInsteadOfNarrativeDrafts(t *testing.T) {
+	system := BuildInteractiveStorySystemInstruction(InteractiveStorySystemInstructionInput{})
+	for _, want := range []string{"thinking", "规划与意图分析", "不要在 thinking 中试写", "完整正文", "完整工具 JSON"} {
+		if !strings.Contains(system, want) {
+			t.Fatalf("interactive system prompt must bound pre-narrative reasoning with %q:\n%s", want, system)
+		}
+	}
+}
+
+func TestInteractiveStoryPromptUsesReadableMapKeysWithoutDuplicateNames(t *testing.T) {
+	system := BuildInteractiveStorySystemInstruction(InteractiveStorySystemInstructionInput{})
+	turn := InteractiveStoryTurnInstruction("我推开门", "", "")
+	for name, output := range map[string]string{"system": system, "turn": turn} {
+		for _, want := range []string{"actor_id 与 name", "故事语言", "状态面板 object 记录", "map key", "不要求重复", "完全相同"} {
+			if !strings.Contains(output, want) {
+				t.Fatalf("%s prompt should use readable map keys without duplicate names; missing %q:\n%s", name, want, output)
+			}
+		}
+	}
+	for _, forbidden := range []string{"禁止用角色展示名称代替稳定 ID", "稳定 ASCII ID", "键必须与对应名称完全相同", "键必须与其名称字段完全相同"} {
+		if strings.Contains(system, forbidden) || strings.Contains(turn, forbidden) {
+			t.Fatalf("interactive prompt still asks for obsolete state panel identity rule %q", forbidden)
+		}
+	}
+}
+
+func TestInteractiveStoryPromptCreatesIndependentActorsForTrackableCharacters(t *testing.T) {
+	system := BuildInteractiveStorySystemInstruction(InteractiveStorySystemInstructionInput{})
+	turn := InteractiveStoryTurnInstruction("我跟柳寒衣进入药园", "", "")
+	for name, output := range map[string]string{"system": system, "turn": turn} {
+		for _, want := range []string{
+			"首次在正文中实际登场",
+			"资料库标记为主要或重要",
+			"当前关键关系对象",
+			"预计反复登场",
+			"独立可变状态",
+			"同一次 state_changes",
+			"关系或 story/在场角色不能代替 create",
+			"此前已经登场但仍没有 Actor",
+			"一次性且没有后续承接价值",
+		} {
+			if !strings.Contains(output, want) {
+				t.Fatalf("%s prompt should define the tracked-character Actor lifecycle; missing %q:\n%s", name, want, output)
+			}
+		}
+	}
+}
+
+func TestInteractiveStoryPromptReadsFullLoreBeforeIntroducingLoreCharacter(t *testing.T) {
+	system := BuildInteractiveStorySystemInstruction(InteractiveStorySystemInstructionInput{})
+	turn := InteractiveStoryTurnInstruction("我去见柳寒衣", "", "")
+	for name, output := range map[string]string{"system": system, "turn": turn} {
+		for _, want := range []string{
+			"资料库中的具名角色首次在正文中实际登场",
+			"首次确定其身份、外貌、能力、性格或关系事实",
+			"写正文前读取完整资料正文",
+			"ResidentLore 或当前 LoreContext",
+			"目录名称、标签、摘要、Actor State 或导演简报都不算完整资料正文",
+			"已知唯一名称直接调用 read_lore_items",
+			"需要查找或消歧时调用 list_lore_items",
+			"detail=full",
+			"资料库没有匹配条目",
+			"不得凭摘要补全设定",
+		} {
+			if !strings.Contains(output, want) {
+				t.Fatalf("%s prompt should require full Lore grounding for a new Lore character; missing %q:\n%s", name, want, output)
+			}
 		}
 	}
 }

@@ -38,7 +38,12 @@ export interface PresetDrafts {
 }
 
 export function presetResourceDraftSignature(item: object) {
-  return JSON.stringify(item)
+  const {
+    created_at: _createdAt,
+    updated_at: _updatedAt,
+    ...editable
+  } = item as Record<string, unknown>
+  return JSON.stringify(editable)
 }
 
 export function cloneTeller(teller: Teller): Teller {
@@ -167,7 +172,6 @@ export function newStoryDirectorDraft(t?: PresetDraftTranslator): Partial<StoryD
       pacing_curve: 'goal-pressure-payoff',
 			event_frequency: 'balanced',
       director_agent_mode: 'triggered',
-		state_schema_adaptation_mode: 'after_opening',
       rule_state_consumption_mode: 'hybrid_auto',
       rule_visibility_mode: 'audit_only',
       branch_planning_turns: 5,
@@ -221,7 +225,7 @@ export function newActorStateDraft(t?: PresetDraftTranslator): Partial<ActorStat
           name: presetDraftText(t, 'settingPanel.presetDraft.actor.templateName', '默认主角状态表'),
           description: presetDraftText(t, 'settingPanel.presetDraft.actor.templateDescription', '示例主角状态表，可替换或新增世界、故事、势力、基地、特定角色等状态表。'),
           fields: [
-            { id: 'current_status', path: 'current.status', name: presetDraftText(t, 'settingPanel.presetDraft.actor.fieldName', '当前状态'), type: 'string', default: presetDraftText(t, 'settingPanel.presetDraft.actor.fieldDefault', '状态稳定，等待剧情确定。'), visibility: 'visible' },
+            { id: 'current_status', path: 'current.status', name: presetDraftText(t, 'settingPanel.presetDraft.actor.fieldName', '当前状态'), type: 'string', default: presetDraftText(t, 'settingPanel.presetDraft.actor.fieldDefault', '状态稳定，等待剧情确定。') },
           ],
         },
       ],

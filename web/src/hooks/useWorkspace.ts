@@ -15,6 +15,7 @@ import {
 } from '@/lib/api'
 import type { BookRecord, BookSortMode } from '@/lib/api'
 import type { WorkspaceSummary } from '@/lib/api'
+import { WorkspaceFileRevisionConflictError } from '@/lib/autosave/workspace-file-revision-conflict'
 import { workspaceFileKind } from '@/lib/workspace-file-kind'
 
 export interface FileNode {
@@ -23,7 +24,10 @@ export interface FileNode {
   children?: FileNode[]
 }
 
-const TREE_AUTO_REFRESH_INTERVAL_MS = 3000
+interface WorkspaceFileDocumentState {
+  content: string
+  revision: string
+}
 
 interface WorkspaceRefreshOptions {
   showLoading?: boolean
@@ -40,7 +44,9 @@ export function useWorkspace(options: UseWorkspaceOptions = {}) {
   const [tree, setTree] = useState<FileNode[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
-  const [fileContent, setFileContent] = useState<string>('')
+  const [fileDocument, setFileDocumentState] = useState<WorkspaceFileDocumentState>({ content: '', revision: '' })
+  const fileContent = fileDocument.content
+  const fileRevision = fileDocument.revision
   const [workspace, setWorkspaceState] = useState<string>('')
   const [workspaceLoaded, setWorkspaceLoaded] = useState(false)
   const [summary, setSummary] = useState<WorkspaceSummary | null>(null)
@@ -49,17 +55,26 @@ export function useWorkspace(options: UseWorkspaceOptions = {}) {
 
   // 用 ref 追踪最新 selectedFile，避免异步回调闭包捕获旧值
   const selectedFileRef = useRef<string | null>(null)
+  const fileDocumentRef = useRef(fileDocument)
   const workspaceRef = useRef(workspace)
   const workspaceEpochRef = useRef(0)
   const workspaceRequestRef = useRef(0)
   const treeRequestRef = useRef(0)
   const summaryRequestRef = useRef(0)
   const booksRequestRef = useRef(0)
+  const backgroundSummaryRefreshRef = useRef<Promise<void> | null>(null)
+  const backgroundSummaryRefreshQueuedRef = useRef(false)
   const fileVersionsRef = useRef<Map<string, { revision: string; workspace: string; generation: number }>>(new Map())
   const fileReadGenerationsRef = useRef<Map<string, number>>(new Map())
   const selectFileRequestRef = useRef(0)
   selectedFileRef.current = selectedFile
+  fileDocumentRef.current = fileDocument
   workspaceRef.current = workspace
+
+  const setFileDocument = useCallback((next: WorkspaceFileDocumentState) => {
+    fileDocumentRef.current = next
+    setFileDocumentState(next)
+  }, [])
 
   const setWorkspace = useCallback((nextWorkspace: string) => {
     if (workspaceRef.current === nextWorkspace) return
@@ -67,16 +82,18 @@ export function useWorkspace(options: UseWorkspaceOptions = {}) {
     workspaceEpochRef.current += 1
     treeRequestRef.current += 1
     summaryRequestRef.current += 1
+    backgroundSummaryRefreshRef.current = null
+    backgroundSummaryRefreshQueuedRef.current = false
     selectFileRequestRef.current += 1
     fileVersionsRef.current.clear()
     fileReadGenerationsRef.current.clear()
     setTree([])
     setSelectedFile(null)
-    setFileContent('')
+    setFileDocument({ content: '', revision: '' })
     setSummary(null)
     setLoading(Boolean(nextWorkspace))
     setWorkspaceState(nextWorkspace)
-  }, [])
+  }, [setFileDocument])
 
   const recordFileVersion = useCallback((targetWorkspace: string, path: string, revision: string) => {
     const previous = fileVersionsRef.current.get(path)
@@ -100,15 +117,17 @@ export function useWorkspace(options: UseWorkspaceOptions = {}) {
   const resetWorkspaceState = useCallback(() => {
     treeRequestRef.current += 1
     summaryRequestRef.current += 1
+    backgroundSummaryRefreshRef.current = null
+    backgroundSummaryRefreshQueuedRef.current = false
     setTree([])
     setLoading(false)
     setSelectedFile(null)
-    setFileContent('')
+    setFileDocument({ content: '', revision: '' })
     selectFileRequestRef.current += 1
     fileVersionsRef.current.clear()
     fileReadGenerationsRef.current.clear()
     setSummary(null)
-  }, [])
+  }, [setFileDocument])
 
   /** 获取当前 workspace 路径 */
   const fetchWorkspace = useCallback(async () => {
@@ -178,6 +197,27 @@ export function useWorkspace(options: UseWorkspaceOptions = {}) {
     }
   }, [workspace])
 
+  /** 合并保存触发的统计刷新，保证大作品最多只有一次全量扫描在途。 */
+  const queueSummaryRefreshAfterSave = useCallback(() => {
+    if (backgroundSummaryRefreshRef.current) {
+      backgroundSummaryRefreshQueuedRef.current = true
+      return
+    }
+
+    const run = () => {
+      backgroundSummaryRefreshQueuedRef.current = false
+      const request = fetchSummary({ clearOnError: false })
+      backgroundSummaryRefreshRef.current = request
+      void request.finally(() => {
+        if (backgroundSummaryRefreshRef.current !== request) return
+        backgroundSummaryRefreshRef.current = null
+        if (backgroundSummaryRefreshQueuedRef.current) run()
+      })
+    }
+
+    run()
+  }, [fetchSummary])
+
   /** 获取当前 Nova 数据目录下实际存在的书籍列表 */
   const fetchBooks = useCallback(async () => {
     const requestID = booksRequestRef.current + 1
@@ -208,27 +248,37 @@ export function useWorkspace(options: UseWorkspaceOptions = {}) {
     void Promise.all([fetchTree(), fetchSummary()])
   }, [fetchSummary, fetchTree, resetWorkspaceState, workspace, workspaceLoaded])
 
-  // 自动刷新目录树，覆盖 AI Agent 直接写入文件后的结构变化。
+  // 窗口重新激活时刷新派生状态；Agent 的文件事件另有即时刷新，避免固定周期扫描整本作品。
   useEffect(() => {
     if (!autoRefreshEnabled || !workspaceLoaded || !workspace) return
+    let cancelled = false
+    let inFlight: Promise<void> | null = null
+    const backgroundOptions = { showLoading: false, clearOnError: false }
     const refreshIfVisible = () => {
-      if (document.visibilityState === 'visible') {
-        const backgroundOptions = { showLoading: false, clearOnError: false }
-        void Promise.all([
-          fetchTree(backgroundOptions),
-          fetchSummary(backgroundOptions),
-        ])
-      }
+      if (cancelled || document.visibilityState !== 'visible') return Promise.resolve()
+      if (inFlight) return inFlight
+      inFlight = Promise.all([
+        fetchTree(backgroundOptions),
+        fetchSummary(backgroundOptions),
+      ]).then(() => undefined).finally(() => {
+        inFlight = null
+      })
+      return inFlight
+    }
+    const refreshOnWakeup = () => {
+      void refreshIfVisible()
+    }
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') refreshOnWakeup()
     }
 
-    const timer = window.setInterval(refreshIfVisible, TREE_AUTO_REFRESH_INTERVAL_MS)
-    window.addEventListener('focus', refreshIfVisible)
-    document.addEventListener('visibilitychange', refreshIfVisible)
+    window.addEventListener('focus', refreshOnWakeup)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
 
     return () => {
-      window.clearInterval(timer)
-      window.removeEventListener('focus', refreshIfVisible)
-      document.removeEventListener('visibilitychange', refreshIfVisible)
+      cancelled = true
+      window.removeEventListener('focus', refreshOnWakeup)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
   }, [autoRefreshEnabled, fetchTree, fetchSummary, workspace, workspaceLoaded])
 
@@ -239,7 +289,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}) {
     selectFileRequestRef.current = requestID
     if (workspaceFileKind(path) === 'image') {
       setSelectedFile(path)
-      setFileContent('')
+      setFileDocument({ content: '', revision: '' })
       return
     }
     const { key, generation } = beginFileRead(targetWorkspace, path)
@@ -250,18 +300,18 @@ export function useWorkspace(options: UseWorkspaceOptions = {}) {
       if (workspaceRef.current !== targetWorkspace || data.workspace !== targetWorkspace) return
       // React 18 自动批量：两个 setState 合并为一次渲染，确保 MarkdownEditor 拿到一致的 (fileName, content)
       setSelectedFile(path)
-      setFileContent(data.content || '')
+      setFileDocument({ content: data.content || '', revision: data.revision || '' })
       recordFileVersion(data.workspace, path, data.revision || '')
     } catch (e) {
       console.error('读取文件失败', e)
     }
-  }, [beginFileRead, isLatestFileRead, recordFileVersion])
+  }, [beginFileRead, isLatestFileRead, recordFileVersion, setFileDocument])
 
   /** 清空当前选中文件，用于关闭最后一个 tab 等场景 */
   const clearSelectedFile = useCallback(() => {
     setSelectedFile(null)
-    setFileContent('')
-  }, [])
+    setFileDocument({ content: '', revision: '' })
+  }, [setFileDocument])
 
   /** 读取指定文件内容 */
   const readFile = useCallback(async (path: string) => {
@@ -284,7 +334,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}) {
     if (!currentFile || !readRequest) return
     if (workspaceRef.current !== targetWorkspace || selectedFileRef.current !== currentFile) return
     if (workspaceFileKind(currentFile) === 'image') {
-      setFileContent('')
+      setFileDocument({ content: '', revision: '' })
       return
     }
 
@@ -293,26 +343,69 @@ export function useWorkspace(options: UseWorkspaceOptions = {}) {
       // 只有同一 workspace + path 的最后一次读取可以更新界面，避免 SSE 连续刷新时旧响应回滚新内容。
       if (!isLatestFileRead(readRequest.key, readRequest.generation)) return
       if (workspaceRef.current !== targetWorkspace || data.workspace !== targetWorkspace || selectedFileRef.current !== currentFile) return
-      setFileContent(data.content || '')
+      setFileDocument({ content: data.content || '', revision: data.revision || '' })
       recordFileVersion(data.workspace, currentFile, data.revision || '')
     } catch (e) {
       console.error('刷新当前文件失败', e)
     }
-  }, [beginFileRead, fetchTree, fetchSummary, isLatestFileRead, recordFileVersion, workspace])
+  }, [beginFileRead, fetchTree, fetchSummary, isLatestFileRead, recordFileVersion, setFileDocument, workspace])
+
+  /** Saves an editor draft against the revision captured with that draft. Typed API errors propagate to the editor adapter. */
+  const saveFileDraft = useCallback(async (path: string, content: string, draftBaseRevision: string) => {
+    if (!workspace || !path) throw new Error('workspace and path are required to save an editor draft')
+    const version = fileVersionsRef.current.get(path)
+    const targetWorkspace = version?.workspace || workspace
+    let result: Awaited<ReturnType<typeof saveFile>>
+    try {
+      result = await saveFile(path, content, draftBaseRevision, targetWorkspace)
+    } catch (error) {
+      if (error instanceof APIError && error.code === 'revision_conflict') {
+        try {
+          const latest = await readWorkspaceFile(path)
+          if (latest.workspace !== targetWorkspace) {
+            console.warn('[useWorkspace.ts] ignored revision-conflict reload from a different workspace', {
+              path,
+              targetWorkspace,
+              loadedWorkspace: latest.workspace,
+            })
+            throw error
+          }
+          if (workspaceRef.current === targetWorkspace && latest.workspace === targetWorkspace && selectedFileRef.current === path) {
+            setFileDocument({ content: latest.content || '', revision: latest.revision || '' })
+            recordFileVersion(targetWorkspace, path, latest.revision || '')
+          }
+          throw new WorkspaceFileRevisionConflictError(error, {
+            workspace: latest.workspace,
+            content: latest.content || '',
+            revision: latest.revision || '',
+          })
+        } catch (reloadError) {
+          if (reloadError instanceof WorkspaceFileRevisionConflictError) throw reloadError
+          console.error('[useWorkspace.ts] failed to reload editor file after revision conflict', { path, targetWorkspace, reloadError })
+        }
+      }
+      throw error
+    }
+    if (result.revision && workspaceRef.current === targetWorkspace) {
+      const currentVersion = fileVersionsRef.current.get(path)
+      if (currentVersion?.workspace === targetWorkspace && currentVersion.revision === draftBaseRevision) {
+        recordFileVersion(targetWorkspace, path, result.revision)
+      }
+      if (selectedFileRef.current === path && fileDocumentRef.current.revision === draftBaseRevision) {
+        setFileDocument({ content, revision: result.revision })
+      }
+    }
+    // 文件写入成功即完成保存；章节统计是派生数据，不能延长编辑器的 saving 状态。
+    queueSummaryRefreshAfterSave()
+    return result
+  }, [queueSummaryRefreshAfterSave, recordFileVersion, setFileDocument, workspace])
 
   /** 保存指定文件内容；路径和 revision 绑定，避免文件切换期间的迟到响应串写。 */
   const saveFileContent = useCallback(async (path: string, content: string): Promise<boolean> => {
     if (!workspace || !path) return false
     const version = fileVersionsRef.current.get(path)
-    const targetWorkspace = version?.workspace || workspace
     try {
-      const result = await saveFile(path, content, version?.revision || '', targetWorkspace)
-      // A refresh may have observed a newer server revision while this save was
-      // in flight. Only advance the exact version object captured by this write.
-      if (result.revision && workspaceRef.current === targetWorkspace && fileVersionsRef.current.get(path) === version) {
-        recordFileVersion(targetWorkspace, path, result.revision)
-      }
-      await fetchSummary()
+      await saveFileDraft(path, content, version?.revision || '')
       return true
     } catch (e) {
       if (e instanceof APIError) {
@@ -328,19 +421,19 @@ export function useWorkspace(options: UseWorkspaceOptions = {}) {
       }
       return false
     }
-  }, [fetchSummary, recordFileVersion, workspace])
+  }, [saveFileDraft, workspace])
 
   /** 切换 workspace 后刷新所有状态 */
   const refreshAll = useCallback(async () => {
     treeRequestRef.current += 1
     summaryRequestRef.current += 1
     setSelectedFile(null)
-    setFileContent('')
+    setFileDocument({ content: '', revision: '' })
     selectFileRequestRef.current += 1
     fileVersionsRef.current.clear()
     fileReadGenerationsRef.current.clear()
     await Promise.all([fetchWorkspace(), fetchBooks()])
-  }, [fetchWorkspace, fetchBooks])
+  }, [fetchWorkspace, fetchBooks, setFileDocument])
 
   /** 新建文件或目录 */
   const createItem = useCallback(async (path: string, type: 'file' | 'dir') => {
@@ -353,10 +446,10 @@ export function useWorkspace(options: UseWorkspaceOptions = {}) {
     await deleteWorkspaceItem(path)
     if (selectedFile === path || selectedFile?.startsWith(`${path}/`)) {
       setSelectedFile(null)
-      setFileContent('')
+      setFileDocument({ content: '', revision: '' })
     }
     await Promise.all([fetchTree(), fetchSummary()])
-  }, [fetchTree, fetchSummary, selectedFile])
+  }, [fetchTree, fetchSummary, selectedFile, setFileDocument])
 
   /** 重命名文件或目录 */
   const renameItem = useCallback(async (path: string, newName: string) => {
@@ -406,6 +499,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}) {
     loading,
     selectedFile,
     fileContent,
+    fileRevision,
     workspace,
     workspaceLoaded,
     summary,
@@ -413,6 +507,7 @@ export function useWorkspace(options: UseWorkspaceOptions = {}) {
     bookSortMode,
     selectFile,
     clearSelectedFile,
+    saveFileDraft,
     saveFileContent,
     readFile,
     createItem,

@@ -30,7 +30,7 @@ type ActorStateSchemaBatchItem struct {
 	ItemID       string                              `json:"item_id" jsonschema:"description=稳定且唯一的幂等 ID，仅使用字母、数字、点、下划线、冒号或短横线"`
 	DependsOn    []string                            `json:"depends_on,omitempty" jsonschema:"description=本项依赖的其他 item_id；依赖项未 accepted 时本项返回 blocked"`
 	Summary      string                              `json:"summary,omitempty"`
-	Requirements []ActorStateSchemaRequirementReview `json:"requirements" jsonschema:"description=本项自包含的来源化需求审查；每项必须填写 evidence_kind"`
+	Requirements []ActorStateSchemaRequirementReview `json:"requirements" jsonschema:"description=本项自包含的来源化需求审查"`
 	Adaptation   ActorStateSchemaAdaptation          `json:"adaptation" jsonschema:"description=仅包含满足本项 requirements 所需的最小 diff"`
 }
 
@@ -66,12 +66,13 @@ type ActorStateSchemaBatchIssue struct {
 // ActorStateSchemaBatchResult reports partial progress without converting
 // item-level validation failures into an opaque tool execution failure.
 type ActorStateSchemaBatchResult struct {
-	Accepted           []ActorStateSchemaBatchAccepted  `json:"accepted"`
-	Rejected           []ActorStateSchemaBatchIssue     `json:"rejected"`
-	Blocked            []ActorStateSchemaBatchIssue     `json:"blocked"`
-	DraftAcceptedItems int                              `json:"draft_accepted_items"`
-	Finalized          bool                             `json:"finalized"`
-	Preview            *ActorStateSchemaProposalPreview `json:"preview,omitempty"`
+	Accepted            []ActorStateSchemaBatchAccepted  `json:"accepted"`
+	Rejected            []ActorStateSchemaBatchIssue     `json:"rejected"`
+	Blocked             []ActorStateSchemaBatchIssue     `json:"blocked"`
+	DraftAcceptedItems  int                              `json:"draft_accepted_items"`
+	Finalized           bool                             `json:"finalized"`
+	Preview             *ActorStateSchemaProposalPreview `json:"preview,omitempty"`
+	InitializationGuide *OpeningStateInitializationGuide `json:"initialization_guide,omitempty"`
 }
 
 type actorStateSchemaDraftItem struct {
@@ -82,12 +83,24 @@ type actorStateSchemaDraftItem struct {
 // ActorStateSchemaBatchDraft owns accepted items for one Agent run. Callers
 // should serialize access; the app already shares its Lore-read audit mutex.
 type ActorStateSchemaBatchDraft struct {
-	base      StoryDirectorActorStateSystem
-	trpg      StoryDirectorTRPGSystem
-	summary   string
-	order     []string
-	items     map[string]actorStateSchemaDraftItem
-	finalized *ActorStateSchemaProposal
+	base            StoryDirectorActorStateSystem
+	trpg            StoryDirectorTRPGSystem
+	incrementalTRPG *StoryDirectorTRPGSystem
+	summary         string
+	order           []string
+	items           map[string]actorStateSchemaDraftItem
+	finalized       *ActorStateSchemaProposal
+}
+
+// NewOpeningActorStateSchemaBatchDraft allows a generated schema to satisfy
+// several TRPG bindings across independently retryable items. Intermediate
+// items validate their own schema shape; finalize still validates the complete
+// proposal against every frozen TRPG binding.
+func NewOpeningActorStateSchemaBatchDraft(base StoryDirectorActorStateSystem, trpg StoryDirectorTRPGSystem) *ActorStateSchemaBatchDraft {
+	draft := NewActorStateSchemaBatchDraft(base, trpg)
+	empty := StoryDirectorTRPGSystem{}
+	draft.incrementalTRPG = &empty
+	return draft
 }
 
 func NewActorStateSchemaBatchDraft(base StoryDirectorActorStateSystem, trpg StoryDirectorTRPGSystem) *ActorStateSchemaBatchDraft {
@@ -206,7 +219,7 @@ func (d *ActorStateSchemaBatchDraft) Submit(batch ActorStateSchemaBatch, audit A
 			before := d.mergedProposal(nil, audit)
 			itemProposal := actorStateSchemaProposalFromBatchItem(candidate.item)
 			combined := mergeActorStateSchemaProposals(before, itemProposal)
-			normalized, _, err := ValidateActorStateSchemaProposal(d.base, d.trpg, combined)
+			normalized, _, err := ValidateActorStateSchemaProposal(d.base, d.incrementalValidationTRPG(), combined)
 			if err != nil {
 				issue := actorStateSchemaBatchIssue(candidate.item.ItemID, actorStateSchemaBatchValidationCode(err), actorStateSchemaBatchValidationPath(path, candidate.item, err), err.Error())
 				result.Rejected = append(result.Rejected, issue)
@@ -214,13 +227,13 @@ func (d *ActorStateSchemaBatchDraft) Submit(batch ActorStateSchemaBatch, audit A
 				continue
 			}
 			normalizedItem := actorStateSchemaProposalTail(normalized, before, candidate.item.Summary)
-			targetSystem, _, targetErr := ApplyActorStateSchemaAdaptation(d.base, d.trpg, normalized.Adaptation)
+			targetSystem, _, targetErr := ApplyActorStateSchemaAdaptation(d.base, d.incrementalValidationTRPG(), normalized.Adaptation)
 			if targetErr != nil {
 				result.Rejected = append(result.Rejected, actorStateSchemaBatchIssue(candidate.item.ItemID, "validation_failed", path+".adaptation", targetErr.Error()))
 				madeProgress = true
 				continue
 			}
-			if issue := validateActorStateSchemaBatchActorValueVisibility(candidate.item.ItemID, normalizedItem, targetSystem, path); issue != nil {
+			if issue := validateActorStateSchemaBatchActorValues(candidate.item.ItemID, normalizedItem, targetSystem, path); issue != nil {
 				result.Rejected = append(result.Rejected, *issue)
 				madeProgress = true
 				continue
@@ -269,6 +282,107 @@ func (d *ActorStateSchemaBatchDraft) Submit(batch ActorStateSchemaBatch, audit A
 	result.Finalized = true
 	result.Preview = &preview
 	return result
+}
+
+func (d *ActorStateSchemaBatchDraft) incrementalValidationTRPG() StoryDirectorTRPGSystem {
+	if d != nil && d.incrementalTRPG != nil {
+		return *d.incrementalTRPG
+	}
+	if d == nil {
+		return StoryDirectorTRPGSystem{}
+	}
+	return d.trpg
+}
+
+// SubmitStructureOnly stages an opening Game Agent batch while rejecting
+// Actor definitions and values item-by-item. Invalid items never enter the
+// run-local draft, and a mixed batch cannot finalize accidentally.
+func (d *ActorStateSchemaBatchDraft) SubmitStructureOnly(batch ActorStateSchemaBatch, audit ActorStateSchemaBatchAudit) ActorStateSchemaBatchResult {
+	valid := batch
+	valid.Items = make([]ActorStateSchemaBatchItem, 0, len(batch.Items))
+	issues := make([]ActorStateSchemaBatchIssue, 0)
+	base := StoryDirectorActorStateSystem{}
+	if d != nil {
+		base = d.base
+	}
+	for index, item := range batch.Items {
+		item = normalizeOpeningStructureTemplateReferences(base, item)
+		path := fmt.Sprintf("items[%d]", index)
+		switch {
+		case len(item.Adaptation.InitialActorOps) > 0:
+			issues = append(issues, actorStateSchemaBatchIssue(strings.TrimSpace(item.ItemID), "actor_values_not_allowed", path+".adaptation.initial_actor_ops", "开局结构工具不能修改 initial_actors；Actor 创建和值请在 submit_interactive_turn.state_changes 中提交"))
+			continue
+		case len(item.Adaptation.ActorOps) > 0:
+			issues = append(issues, actorStateSchemaBatchIssue(strings.TrimSpace(item.ItemID), "actor_values_not_allowed", path+".adaptation.actor_ops", "开局结构工具不能写 Actor 值；初始状态请在 submit_interactive_turn.state_changes 中提交"))
+			continue
+		}
+		invalidPolicy := false
+		for requirementIndex, requirement := range item.Requirements {
+			if strings.TrimSpace(requirement.ValuePolicy) == ActorStateSchemaValuePolicySchemaOnly {
+				continue
+			}
+			issues = append(issues, actorStateSchemaBatchIssue(strings.TrimSpace(item.ItemID), "value_policy_not_allowed", fmt.Sprintf("%s.requirements[%d].value_policy", path, requirementIndex), "开局结构工具的 requirement 只能使用 value_policy=schema_only"))
+			invalidPolicy = true
+			break
+		}
+		if !invalidPolicy {
+			valid.Items = append(valid.Items, item)
+		}
+	}
+	if len(issues) > 0 {
+		valid.Finalize = false
+	}
+	result := d.Submit(valid, audit)
+	result.Rejected = append(result.Rejected, issues...)
+	if result.Finalized {
+		if proposal, ok := d.FinalProposal(); ok {
+			target, _, err := ApplyActorStateSchemaAdaptation(d.base, d.trpg, proposal.Adaptation)
+			if err == nil {
+				guide, guideErr := buildOpeningStateInitializationGuide(target)
+				if guideErr == nil {
+					result.InitializationGuide = &guide
+				}
+			}
+		}
+	}
+	return result
+}
+
+// normalizeOpeningStructureTemplateReferences accepts an initial Actor ID only
+// when it maps unambiguously to an existing template. This keeps the opening
+// tool ergonomic without adding fuzzy aliases to the general Director schema
+// API, and finalized proposals always persist the canonical template ID.
+func normalizeOpeningStructureTemplateReferences(base StoryDirectorActorStateSystem, item ActorStateSchemaBatchItem) ActorStateSchemaBatchItem {
+	system := normalizeActorStateSystem(base)
+	resolve := func(reference string) string {
+		if strings.TrimSpace(reference) == "" {
+			return ""
+		}
+		templateID := normalizeActorStateID(reference)
+		if templateID != "" && actorStateTemplateByID(system, templateID).ID != "" {
+			return templateID
+		}
+		actorID := normalizeStatePanelActorID(reference)
+		for _, actor := range system.InitialActors {
+			if actor.ID == actorID && actorStateTemplateByID(system, actor.TemplateID).ID != "" {
+				return actor.TemplateID
+			}
+		}
+		return templateID
+	}
+
+	item.Requirements = append([]ActorStateSchemaRequirementReview(nil), item.Requirements...)
+	for index := range item.Requirements {
+		item.Requirements[index].TemplateID = resolve(item.Requirements[index].TemplateID)
+	}
+	item.Adaptation.TemplateOps = append([]ActorStateTemplateSchemaOp(nil), item.Adaptation.TemplateOps...)
+	for index := range item.Adaptation.TemplateOps {
+		op := &item.Adaptation.TemplateOps[index]
+		if strings.TrimSpace(op.Op) != "add" {
+			op.TemplateID = resolve(op.TemplateID)
+		}
+	}
+	return item
 }
 
 // FinalProposal returns a deep copy only after a successful finalize.
@@ -411,8 +525,6 @@ func actorStateSchemaBatchItemFingerprint(item ActorStateSchemaBatchItem) string
 func actorStateSchemaBatchValidationCode(err error) string {
 	message := err.Error()
 	switch {
-	case strings.Contains(message, "秘密或剧透"):
-		return "inferred_secret_value"
 	case strings.Contains(message, "expected_type"):
 		return "invalid_expected_type"
 	case strings.Contains(message, "来源"):
@@ -430,18 +542,6 @@ func actorStateSchemaBatchValidationCode(err error) string {
 
 func actorStateSchemaBatchValidationPath(basePath string, item ActorStateSchemaBatchItem, err error) string {
 	message := err.Error()
-	if strings.Contains(message, "秘密或剧透") {
-		for opIndex, op := range item.Adaptation.ActorOps {
-			if op.Op == "set" && strings.Contains(message, "field="+normalizeActorStateFieldName(op.FieldID)) {
-				return fmt.Sprintf("%s.adaptation.actor_ops[%d].value", basePath, opIndex)
-			}
-			for fieldID := range op.Actor.State {
-				if strings.Contains(message, "field="+normalizeActorStateFieldName(fieldID)) {
-					return fmt.Sprintf("%s.adaptation.actor_ops[%d].actor.state.%s", basePath, opIndex, fieldID)
-				}
-			}
-		}
-	}
 	for index, requirement := range item.Requirements {
 		if strings.Contains(message, "source="+strings.TrimSpace(requirement.Source.ID)) {
 			return fmt.Sprintf("%s.requirements[%d]", basePath, index)

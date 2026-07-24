@@ -132,6 +132,11 @@ func validateStoryMeta(meta StoryMeta) error {
 	if err := validateStoryChoiceCount(meta.ChoiceCount); err != nil {
 		return err
 	}
+	if meta.DirectorRunPolicy != nil {
+		if err := ValidateStoryDirectorRunPolicy(*meta.DirectorRunPolicy); err != nil {
+			return err
+		}
+	}
 	switch meta.ImageSettings.Mode {
 	case StoryImageModeManual, StoryImageModeInterval:
 	default:
@@ -247,7 +252,7 @@ func validateActorStateOp(op ActorStateOp) error {
 	default:
 		return fmt.Errorf("未知 Actor 状态操作: %q", op.Op)
 	}
-	if normalizeActorStateID(op.ActorID) == "" {
+	if normalizeStatePanelActorID(op.ActorID) == "" {
 		return fmt.Errorf("Actor 状态操作缺少 actor_id")
 	}
 	if normalizeActorStateFieldName(op.FieldID) == "" {

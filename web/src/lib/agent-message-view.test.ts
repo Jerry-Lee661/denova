@@ -1,8 +1,41 @@
 import { describe, expect, it } from 'vitest'
 import type { AgentUIMessage } from './agent-ui'
-import { buildAgentMessageViews, selectAgentTokenUsageRecords } from './agent-message-view'
+import {
+  buildAgentMessageViews,
+  countCompletedAgentTurnSignals,
+  hasCompletedAgentTurn,
+  selectAgentTokenUsageRecords,
+} from './agent-message-view'
 
 describe('agent-message-view', () => {
+  it('复用未变化消息的 view，只重建正在变化的流式消息', () => {
+    const [historyMessage, firstStreamingMessage] = [
+      {
+        id: 'history-assistant',
+        role: 'assistant',
+        parts: [{ type: 'text', text: '已经渲染的历史正文' }],
+      },
+      {
+        id: 'active-assistant',
+        role: 'assistant',
+        parts: [{ type: 'text', text: '第一段', state: 'streaming' }],
+      },
+    ] as AgentUIMessage[]
+
+    const firstViews = buildAgentMessageViews([historyMessage, firstStreamingMessage])
+    const secondViews = buildAgentMessageViews([
+      historyMessage,
+      {
+        ...firstStreamingMessage,
+        parts: [{ type: 'text', text: '第一段，继续生成', state: 'streaming' }],
+      },
+    ] as AgentUIMessage[])
+
+    expect(secondViews[0]).toBe(firstViews[0])
+    expect(secondViews[1]).not.toBe(firstViews[1])
+    expect(secondViews[1].content).toBe('第一段，继续生成')
+  })
+
   it('从 AgentUIMessage parts 生成稳定渲染 view', () => {
     const messages: AgentUIMessage[] = [
       { id: 'hidden-user', role: 'user', metadata: { display_hidden: true }, parts: [{ type: 'text', text: 'hidden' }] },
@@ -70,6 +103,19 @@ describe('agent-message-view', () => {
     expect(records).toEqual([
       expect.objectContaining({ id: 'usage-1', role: 'token_usage', run_id: 'run-1', agent_kind: 'chat', model_calls: 2, total_tokens: 88 }),
     ])
+  })
+
+  it('只在 Agent 已产生有效结果且不再流式输出时标记完成回合', () => {
+    const messages = [{
+      id: 'assistant-1',
+      role: 'assistant',
+      parts: [{ type: 'text', text: '已经完成的正文', state: 'done' }],
+    }] as AgentUIMessage[]
+
+    expect(countCompletedAgentTurnSignals(messages)).toBe(1)
+    expect(hasCompletedAgentTurn(messages, true)).toBe(false)
+    expect(hasCompletedAgentTurn(messages, false)).toBe(true)
+    expect(hasCompletedAgentTurn([], false)).toBe(false)
   })
 
   it('忽略空内容的 system 和未知 activity data part', () => {

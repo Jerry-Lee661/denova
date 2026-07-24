@@ -3,6 +3,7 @@ package interactive
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"reflect"
 	"strings"
 )
@@ -15,6 +16,7 @@ type TurnStateUpdateCompileOptions struct {
 	SourceTurnID             string
 	RuleResolution           *RuleResolution
 	RuleStateConsumptionMode string
+	actorLifecycleIntents    map[string]actorLifecycleIntent
 }
 
 // CompiledTurnStateUpdates contains canonical audit input and deterministic
@@ -29,12 +31,13 @@ type CompiledTurnStateUpdates struct {
 // StateUpdateValidationError identifies the exact operation that made the
 // atomic state_updates module invalid.
 type StateUpdateValidationError struct {
-	Index    int
-	Code     string
-	Path     string
-	Expected string
-	Actual   string
-	Cause    error
+	Index          int
+	Code           string
+	Path           string
+	DiagnosticPath string
+	Expected       string
+	Actual         string
+	Cause          error
 }
 
 func (e *StateUpdateValidationError) Error() string {
@@ -47,40 +50,96 @@ func (e *StateUpdateValidationError) Error() string {
 	return e.Code
 }
 
+// StateUpdateValidationErrors keeps independent failures from one atomic
+// module together so callers can repair them in one retry. It still unwraps to
+// individual errors for existing fail-fast callers using errors.As.
+type StateUpdateValidationErrors struct {
+	Items []*StateUpdateValidationError
+}
+
+func (e *StateUpdateValidationErrors) Error() string {
+	if e == nil || len(e.Items) == 0 {
+		return ""
+	}
+	return e.Items[0].Error()
+}
+
+func (e *StateUpdateValidationErrors) Unwrap() []error {
+	if e == nil {
+		return nil
+	}
+	errors := make([]error, 0, len(e.Items))
+	for _, item := range e.Items {
+		if item != nil {
+			errors = append(errors, item)
+		}
+	}
+	return errors
+}
+
 // CompileTurnStateUpdates validates the complete state_updates module against
 // the frozen Actor schema and current replayed state. Any invalid operation
 // rejects the whole module.
 func CompileTurnStateUpdates(system StoryDirectorActorStateSystem, currentState map[string]any, updates []StateUpdate, options TurnStateUpdateCompileOptions) (CompiledTurnStateUpdates, error) {
 	updates = normalizeTurnStateUpdates(updates)
-	if len(updates) > maxInteractiveListItems {
-		return CompiledTurnStateUpdates{}, &StateUpdateValidationError{
-			Index:    maxInteractiveListItems,
-			Code:     "too_many_state_updates",
-			Expected: fmt.Sprintf("at most %d operations", maxInteractiveListItems),
-			Actual:   fmt.Sprintf("%d operations", len(updates)),
-			Cause:    fmt.Errorf("state_updates 不能超过 %d 项", maxInteractiveListItems),
+	system = normalizeActorStateSystem(system)
+	lifecycleIntents := options.actorLifecycleIntents
+	if lifecycleIntents == nil {
+		var err error
+		lifecycleIntents, err = planActorLifecycleUpdates(system, currentState, updates)
+		if err != nil {
+			return CompiledTurnStateUpdates{}, err
 		}
 	}
-
-	system = normalizeActorStateSystem(system)
 	workingState := cloneActorStateRoot(currentState)
 	compiled := CompiledTurnStateUpdates{Updates: []StateUpdate{}, Ops: []StateOp{}, ActorOps: []ActorStateOp{}}
 	canonicalPaths := make([][]string, 0, len(updates))
 
 	for index, update := range updates {
+		deltaNormalized := false
+		if update.Op == TurnStateUpdateDelta {
+			if converted, changed := normalizeTurnSubmissionFieldValue(ActorStateField{Type: "number"}, update.Value); changed {
+				update.Value = converted
+				deltaNormalized = true
+			}
+		}
 		if err := validateStateUpdateShape(update); err != nil {
-			return CompiledTurnStateUpdates{}, stateUpdateError(index, "invalid_state_update", update.Path, "replace, delta, or create with a non-null value", stateUpdateActual(update.Value), err)
+			return CompiledTurnStateUpdates{}, stateUpdateError(index, "invalid_state_update", update.Path, "replace, delta, create, archive, or restore with a non-null value", stateUpdateActual(update.Value), err)
 		}
 		segments, err := parseStateUpdatePath(update.Path)
 		if err != nil {
 			return CompiledTurnStateUpdates{}, stateUpdateError(index, "invalid_state_path", update.Path, "schema-bound JSON Pointer", update.Path, err)
 		}
 		actorID := segments[0]
-		if actorID == "" || normalizeActorStateID(actorID) != actorID {
-			return CompiledTurnStateUpdates{}, stateUpdateError(index, "invalid_actor_id", update.Path, "stable ASCII actor_id", actorID, fmt.Errorf("状态路径必须使用稳定 actor_id，不能使用展示名称: %q", actorID))
+		if actorID == "" || normalizeStatePanelActorID(actorID) != actorID {
+			return CompiledTurnStateUpdates{}, stateUpdateError(index, "invalid_actor_id", update.Path, "normalized actor_id", actorID, fmt.Errorf("状态路径包含无效 actor_id: %q", actorID))
 		}
 		if err := validateStateUpdateValueSize(update.Value); err != nil {
 			return CompiledTurnStateUpdates{}, stateUpdateError(index, "state_value_too_large", update.Path, fmt.Sprintf("at most %d JSON bytes", maxTurnStateUpdateValueBytes), stateUpdateActual(update.Value), err)
+		}
+		if update.Op == TurnStateUpdateArchive || update.Op == TurnStateUpdateRestore {
+			intent := lifecycleIntents[actorID]
+			canonical := []string{actorArchiveRoot, actorID}
+			if conflict := overlappingStateUpdatePath(canonicalPaths, canonical); conflict != "" {
+				return CompiledTurnStateUpdates{}, stateUpdateError(index, "overlapping_state_path", update.Path, "one lifecycle operation per Actor", conflict, fmt.Errorf("同一次提交不能包含重复或相互覆盖的状态路径: %s", conflict))
+			}
+			stateOp := StateOp{
+				Path:         actorArchiveStatePath(actorID),
+				Reason:       intent.Reason,
+				SourceTurnID: options.SourceTurnID,
+				SourceKind:   StateOpSourceTurnResult,
+			}
+			if update.Op == TurnStateUpdateArchive {
+				stateOp.Op = "set"
+				stateOp.Value = map[string]any{"reason": intent.Reason, "source_turn_id": options.SourceTurnID}
+			} else {
+				stateOp.Op = "unset"
+			}
+			applyStateOp(workingState, stateOp)
+			canonicalPaths = append(canonicalPaths, canonical)
+			compiled.Updates = append(compiled.Updates, StateUpdate{Op: update.Op, Path: formatStateUpdatePath([]string{actorID}), Value: map[string]any{"reason": intent.Reason}})
+			compiled.Ops = append(compiled.Ops, stateOp)
+			continue
 		}
 
 		if update.Op == TurnStateUpdateCreate {
@@ -94,6 +153,19 @@ func CompileTurnStateUpdates(system StoryDirectorActorStateSystem, currentState 
 			patch, err := actorPatchFromCreateUpdate(actorID, update.Value)
 			if err != nil {
 				return CompiledTurnStateUpdates{}, stateUpdateError(index, "invalid_actor_create", update.Path, "actor create object", stateUpdateActual(update.Value), err)
+			}
+			configuredInitialActor := actorStateInitialActorIndex(system.InitialActors, actorID) >= 0
+			if !configuredInitialActor && (patch.ActorName == "" || normalizeStatePanelActorID(patch.ActorName) != actorID) {
+				return CompiledTurnStateUpdates{}, stateUpdateError(index, "actor_name_id_mismatch", update.Path, "actor_id identical to name", patch.ActorName, fmt.Errorf("新建 Actor 的 actor_id 必须与 name 完全相同，并直接使用故事语言中的角色名称: actor_id=%q name=%q", actorID, patch.ActorName))
+			}
+			if !configuredInitialActor {
+				patch.ActorName = actorID
+			}
+			if template := actorStateTemplateByID(system, patch.TemplateID); template.ID != "" {
+				patch.State = normalizeTurnSubmissionActorStateValues(actorID, template, patch.State)
+				if validationErrors := validateTurnSubmissionActorInitialState(index, update.Path, template, patch.State); len(validationErrors) > 0 {
+					return CompiledTurnStateUpdates{}, &StateUpdateValidationErrors{Items: validationErrors}
+				}
 			}
 			patch.SourceTurnID = options.SourceTurnID
 			normalized, ops, actorOps, _, _, err := validateActorStatePatch(system, workingState, patch)
@@ -125,10 +197,10 @@ func CompileTurnStateUpdates(system StoryDirectorActorStateSystem, currentState 
 		if !found {
 			return CompiledTurnStateUpdates{}, stateUpdateError(index, "state_field_not_found", update.Path, strings.Join(turnSubmissionAllowedFields(template), ", "), segments[1], fmt.Errorf("Actor 状态字段不在模板中: actor=%s field=%s", actorID, segments[1]))
 		}
-		if field.Visibility == "hidden" {
-			return CompiledTurnStateUpdates{}, stateUpdateError(index, "state_field_hidden", update.Path, "model-writable field", actorStateFieldID(field), fmt.Errorf("隐藏状态字段不能由 Game Agent 直接修改"))
-		}
 		fieldID := actorStateFieldID(field)
+		if deltaNormalized {
+			log.Printf("[interactive-turn-submission] normalized lossless delta actor_id=%q field_id=%q from=string to=number location=internal/interactive/turn_state_updates.go", actorID, fieldID)
+		}
 		canonical := append([]string{actorID, fieldID}, segments[2:]...)
 		if conflict := overlappingStateUpdatePath(canonicalPaths, canonical); conflict != "" {
 			return CompiledTurnStateUpdates{}, stateUpdateError(index, "overlapping_state_path", update.Path, "non-overlapping paths", conflict, fmt.Errorf("同一次提交不能包含重复或相互覆盖的状态路径: %s", conflict))
@@ -136,15 +208,34 @@ func CompileTurnStateUpdates(system StoryDirectorActorStateSystem, currentState 
 		if stateUpdateConflictsWithRuleResolution(options, actorID, fieldID) {
 			return CompiledTurnStateUpdates{}, stateUpdateError(index, "duplicate_rule_state_update", update.Path, "a field not consumed by RuleResolution", fieldID, fmt.Errorf("该字段已由本轮 RuleResolution 自动消费，不能在 state_updates 中重复修改"))
 		}
+		if len(segments) == 2 && update.Op == TurnStateUpdateReplace {
+			if converted, changed := normalizeTurnSubmissionFieldValue(field, update.Value); changed {
+				log.Printf("[interactive-turn-submission] normalized lossless field value actor_id=%q field_id=%q from=string to=%s location=internal/interactive/turn_state_updates.go", actorID, fieldID, field.Type)
+				update.Value = converted
+			}
+		}
 
 		currentValue := actorStateFieldValue(workingState, actorID, fieldID)
 		nextValue, auditValue, err := applyStateUpdateValue(field, currentValue, segments[2:], update)
 		if err != nil {
 			code := "state_value_invalid"
+			actualValue := update.Value
 			if update.Op == TurnStateUpdateDelta {
 				code = "delta_target_not_number"
+				actualValue = currentValue
+				if len(segments) > 2 {
+					if currentObject, ok := currentValue.(map[string]any); ok {
+						if leaf, found := stateUpdateNestedValue(currentObject, segments[2:]); found {
+							actualValue = leaf
+						} else {
+							actualValue = nil
+						}
+					}
+				}
+			} else if len(segments) > 2 {
+				actualValue = currentValue
 			}
-			return CompiledTurnStateUpdates{}, stateUpdateError(index, code, update.Path, stateUpdateExpected(field, segments[2:], update.Op), stateUpdateActual(currentValue), err)
+			return CompiledTurnStateUpdates{}, stateUpdateError(index, code, update.Path, stateUpdateExpected(field, segments[2:], update.Op), stateUpdateActual(actualValue), err)
 		}
 		if reflect.DeepEqual(currentValue, nextValue) {
 			continue
@@ -182,8 +273,13 @@ func CompileTurnStateUpdates(system StoryDirectorActorStateSystem, currentState 
 		compiled.Ops = append(compiled.Ops, ops...)
 		compiled.ActorOps = append(compiled.ActorOps, actorOps...)
 	}
+	for _, intent := range sortedActorLifecycleIntents(lifecycleIntents, TurnStateUpdateArchive) {
+		ops, actorOps := compileActorArchivePresenceCleanup(system, workingState, intent, options.SourceTurnID)
+		compiled.Ops = append(compiled.Ops, ops...)
+		compiled.ActorOps = append(compiled.ActorOps, actorOps...)
+	}
 
-	compiled.Ops = normalizeStateOps(compiled.Ops)
+	compiled.Ops = normalizeStateOpsUnbounded(compiled.Ops)
 	compiled.ActorOps = normalizeActorStateOps(compiled.ActorOps)
 	return compiled, nil
 }
@@ -321,7 +417,7 @@ func stateUpdateConflictsWithRuleResolution(options TurnStateUpdateCompileOption
 		return false
 	}
 	for _, change := range normalizeTurnStateChanges(options.RuleResolution.Result.StateChanges) {
-		if normalizeActorStateID(change.ActorID) == actorID && actorStateFieldNameKey(change.FieldID) == actorStateFieldNameKey(fieldID) {
+		if normalizeStatePanelActorID(change.ActorID) == actorID && actorStateFieldNameKey(change.FieldID) == actorStateFieldNameKey(fieldID) {
 			return true
 		}
 	}

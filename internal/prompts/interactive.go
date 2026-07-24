@@ -29,6 +29,7 @@ type InteractiveStoryPromptInput struct {
 	DirectorPlanVisible         string
 	StoryDirectorRules          string
 	ActorState                  string
+	StateSchemaInitialization   string
 	StoryDirectorStrategyPrompt string
 	PreviousTurnsSummary        string
 	LoreContext                 string
@@ -57,6 +58,10 @@ type InteractiveDirectorPromptInput struct {
 	EventOpportunity            string
 	EventRuntime                string
 }
+
+const interactiveTrackableActorInstruction = "当一个具名角色或敌对对象首次在正文中实际登场，并且它被资料库标记为主要或重要角色、成为当前关键关系对象或目标、预计反复登场，或拥有需要持续追踪的独立可变状态时，必须在同一次 state_changes 中使用 create 创建独立 Actor；只写入 protagonist/关系或 story/在场角色不能代替 create。若符合条件的角色此前已经登场但仍没有 Actor，本轮继续涉及时必须补建；已有 Actor 只更新，不重复创建。仅被提及、背景人群、或一次性且没有后续承接价值的临时角色不要创建 Actor。"
+
+const interactiveLoreCharacterGroundingInstruction = "当本轮准备让资料库中的具名角色首次在正文中实际登场，或首次确定其身份、外貌、能力、性格或关系事实时，如果该角色的完整资料正文尚未通过 ResidentLore 或当前 LoreContext 注入，必须在写正文前读取完整资料正文；目录名称、标签、摘要、Actor State 或导演简报都不算完整资料正文。已知唯一名称直接调用 read_lore_items；需要查找或消歧时调用 list_lore_items，并用 detail=full 在同次返回正文。资料库没有匹配条目时，才可依据用户输入与已确认上下文创建新角色；不得凭摘要补全设定。读取失败时保守使用已确认事实继续，不要臆造未读取内容。"
 
 func BuildInteractiveStorySystemInstruction(in InteractiveStorySystemInstructionInput) string {
 	var sb strings.Builder
@@ -105,7 +110,9 @@ func BuildInteractiveStoryFlowInstruction(in InteractiveStorySystemInstructionIn
 	sb.WriteString("## 工具化召回流程\n")
 	sb.WriteString("- 资料库正文和较早历史不会默认整段注入；需要长期设定或角色资料时读取资料库，需要既往线索或已发生事实时检索当前分支 Turn 历史。\n")
 	sb.WriteString("- 上下文已提供有界资料名称目录；已知唯一名称时可直接用 read_lore_items 读取正文，无需先 list。需要按语义筛选时可用 list_lore_items，detail=full 能在同一次调用返回筛选结果正文；不要臆造未读取的资料库内容。\n")
+	sb.WriteString("- " + interactiveLoreCharacterGroundingInstruction + "\n")
 	sb.WriteString("- 历史事实召回使用 search_story_history 检索当前分支已提交 Turn；每条结果都带 turn_id 来源。Turn 是历史事实真源，Actor State 是当前投影，director.md 是未来计划，资料库是稳定设定，不得混用。\n")
+	sb.WriteString("- 正文前的 thinking 只做简短的规划与意图分析：确认本轮目标、约束、必要工具、关键状态事实和场景落点。不要在 thinking 中试写、逐段构思、复述或自检完整正文，也不要预先展开完整工具 JSON；玩家可见正文只在正文通道一次成稿。\n")
 	sb.WriteString("- 每轮必须遵循这个流程：理解用户行动和当前快照 → 必要时读取资料库或检索历史 Turn → 判断是否需要固定检定 → 如需检定，调用 prepare_interactive_turn → 形成正文和一致的状态变化 → 直接输出完整故事正文 → 调用 submit_interactive_turn 提交 state_changes 与 choices → 两个模块都成功后立即结束。\n")
 	sb.WriteString("- 不是所有用户行动都需要检定。普通观察、对话、小范围移动、低风险试探、顺着既有局势推进且无明确代价的叙事承接，应由你直接裁定并写成故事正文。\n")
 	sb.WriteString("- 只有当行动存在明确风险、资源/关系/数值变化、当前 TRPG 检定配置命中、失败等级、不可逆后果或终局候选，需要固定规则裁定时，才调用 prepare_interactive_turn。\n")
@@ -117,8 +124,11 @@ func BuildInteractiveStoryFlowInstruction(in InteractiveStorySystemInstructionIn
 	sb.WriteString("- prepare_interactive_turn 的 outcomes 每档只填写 result，不接收 state_changes；State Binding 的确定性变化由后端计算，其余变化统一在正文之后通过 submit_interactive_turn.state_changes 提交。\n")
 	sb.WriteString("- prepare_interactive_turn 参数协议：difficulty 必须使用 very_easy/easy/normal/hard/very_hard；rule 可省略，若提供只能使用 template=dice_check、roll_mode=normal/advantage/disadvantage；工具只使用固定 d20，不要传其他骰子；不要使用 medium 或 moderate。\n")
 	sb.WriteString("- submit_interactive_turn 每回合都必须在正文输出完成后调用。首次调用同时提供 state_changes 与 choices；两者仍由后端独立解析、校验和保留。ready=false 时只在同一工具中重交 retry_modules 指定的字段，已经 accepted 的模块不要重复提交；ready=true 后立即结束本回合。\n")
+	sb.WriteString("- 动态状态结构首回合在 initialize_story_state_schema finalized 后，首次 state_changes 必须按 initialization_guide.required_state_changes 一次补齐每个仍缺初值的可写字段；模板默认值已自动初始化，无需重复。禁止用空字符串、未设置、未知或待定占位绕过初始化。\n")
 	sb.WriteString("- submit_interactive_turn 可随 choices 携带 director_update。默认省略：普通承接、同一场景内的小变化、常规资源消耗和既定冲突推进不需要后台导演。只有当前目标/阶段改变、关键关系或势力重大变化、重要秘密揭示、不可逆结果，或现有简报已无法指导下一回合时才设置 needed=true，并只说明已发生事实；patch/replan 与修改文件由 Director 决定。\n")
-	sb.WriteString("- state_changes 只能使用 replace、delta、create，并分别填写 Actor 状态手册中的精确 actor_id、field_id 或 template_id；禁止用角色展示名称代替稳定 ID。replace 设置字段完整新值，delta 只增减已有数值且不能把缺失值当作 0，object 子字段用 subpath 字符串数组，create 用独立字段创建 Actor；不要自行拼接路径字符串。不能重复 RuleResolution 已消费的字段。\n")
+	sb.WriteString("- state_changes 只能使用 replace、delta、create。引用已有 Actor 时逐字使用状态手册中的 actor_id；create 新建 Actor 时 name 必填，actor_id 与 name 完全相同，直接使用故事语言中的角色名称，不得生成英文、拼音或 slug ID。field_id、template_id 逐字使用状态手册中的现有值。replace 设置字段完整新值，delta 只增减已有数值且不能把缺失值当作 0，object 子字段用 subpath 字符串数组；不要自行拼接路径字符串。不能重复 RuleResolution 已消费的字段。\n")
+	sb.WriteString("- " + interactiveTrackableActorInstruction + "\n")
+	sb.WriteString("- 状态面板 object 记录直接使用稳定、可读的故事语言 map key 作为该条记录的 ID，不得另造英文、拼音或 slug ID；子值按字段说明与现有记录组织，不要求重复写入名称字段。\n")
 	sb.WriteString("- story_context 是每回合必须维护的基础状态对象：state_changes 至少 replace actor_id=story、field_id=当前事件；当前详细地点尚未初始化或正文确定地点变化时，同时 replace field_id=当前详细地点。其余字段只按正文已经确定的事实更新；没有依据时保留现值，禁止用空值覆盖。\n")
 	sb.WriteString(fmt.Sprintf("- 非终局回合 choices 必须提供恰好 %d 个文本不同、行动方向也不同且与正文结尾一致的建议；只有 prepare_interactive_turn 返回 terminal_candidate 的终局回合才提交空数组。\n", normalizeInteractiveChoiceCount(in.ChoiceCount)))
 	sb.WriteString("- 后台导演规划是导演已消化后的当前计划，不是事件系统清单；只读取其中正文 Agent 可读区，不要为了引用事件 ID 或事件类型而生硬触发事件。\n")
@@ -157,6 +167,9 @@ func InteractiveStoryRuntimeContext(in InteractiveStoryPromptInput) string {
 	}
 	if strings.TrimSpace(in.ActorState) != "" {
 		writeBlock(&sb, "Actor 状态手册（source: Snapshot.State.actors + effective Actor schema, bounded Markdown）", in.ActorState)
+	}
+	if strings.TrimSpace(in.StateSchemaInitialization) != "" {
+		writeBlock(&sb, "开局状态结构契约（source: StoryMeta.state_schema_policy + state_schema_initialization, bounded）", in.StateSchemaInitialization)
 	}
 	if strings.TrimSpace(in.StoryDirectorStrategyPrompt) != "" {
 		writeBlock(&sb, "故事导演 Markdown 策略提示（source: StoryDirector.strategy.prompt_markdown, bounded）", strategyPromptWithPriorityNote(in.StoryDirectorStrategyPrompt))
@@ -205,13 +218,15 @@ func InteractiveStoryTurnInstruction(message, turnContext, runtimeContext string
 
 请基于互动故事上下文续写下一回合，只输出读者可直接看到的故事正文；不要输出计划、解释、状态 JSON、Markdown 标题、工具说明或 XML 包装。
 本回合必须隐式完成：识别用户行动、判断相关角色和世界规则、裁定后果、制造新的可选择、保持角色和世界一致性；不要输出这些分析过程。
+%s
 不是所有用户行动都需要检定；普通观察、对话、小范围移动、低风险试探和无明确代价的叙事承接，应由你直接裁定并写正文。
 只有当本回合存在明确风险、资源/关系/数值变化、当前 TRPG 检定配置命中、失败等级、不可逆后果或终局候选，需要固定规则裁定时，才调用 prepare_interactive_turn；工具只负责固定 d20、优势/劣势检定和四档后果选择，不负责替你理解剧情或选择事件。
 调用 prepare_interactive_turn 时，先参考当前 TRPG 检定配置中的 trigger、must_check_examples、skip_check_examples、difficulty_guidance 和 state_effect_guidance 判断是否检定、difficulty/bonuses 与四档 outcomes.*.result；outcomes 不接收 state_changes。skip_check_examples 命中时优先直接裁定，must_check_examples 命中时优先固定检定。若当前规则提供 state_bindings，投骰前选择 binding_id，并填写 actor_id 与必要的 target_actor_id；modifiers 与 outcome_state_changes 会按 field_id 自动读取状态计算，narrative_state_refs 用于帮助你写四档后果。必须填写 adjudication 说明检定理由、stakes、难度依据和优势/劣势依据；状态引用一律使用 actor_id + field_id；difficulty 必须使用 very_easy/easy/normal/hard/very_hard；普通难度使用 normal，不要使用 medium 或 moderate；rule 可省略，若提供只能是 template=dice_check、roll_mode=normal/advantage/disadvantage。
-先直接输出完整正文，再调用 submit_interactive_turn；首次同时提供 state_changes 与 choices。state_changes 使用 replace/delta/create，并填写状态手册中的精确 actor_id、field_id、可选 subpath 或 template_id，不要自行拼接路径字符串；每回合至少 replace actor_id=story、field_id=当前事件，首次初始化或地点变化时同步当前详细地点，不得重复 RuleResolution 已消费的字段。非终局回合 choices 必须给出当前故事配置数量的不同建议；仅 prepare_interactive_turn 返回 terminal_candidate 的终局回合使用空数组。director_update 默认省略，只有本轮已发生事实让目标、阶段、关键关系/势力、重大线索或规划前提发生实质变化时才设置 needed=true。两个模块由后端独立解析和保留；ready=false 时只在同一工具中重交 retry_modules 指定的字段，ready=true 后立即结束，不得重复输出正文。不得把 TurnResult、工具结果或状态 JSON 写进正文。
-长期设定和角色资料通过 list_lore_items/read_lore_items 按需读取；如果本轮行动明显依赖既往线索、旧承诺或分支内已发生事实，使用 search_story_history 检索 Turn，并以返回的 turn_id 为来源。
+%s
+先直接输出完整正文，再调用 submit_interactive_turn；首次同时提供 state_changes 与 choices。state_changes 使用 replace/delta/create，并填写状态手册中的精确 actor_id、field_id、可选 subpath 或 template_id，不要自行拼接路径字符串；新建 Actor 的 actor_id 与 name 必须完全相同并直接使用故事语言中的角色名称；状态面板 object 记录直接使用稳定、可读的故事语言 map key 作为 ID，不要求重复的内部名称字段。每回合至少 replace actor_id=story、field_id=当前事件，首次初始化或地点变化时同步当前详细地点，不得重复 RuleResolution 已消费的字段。非终局回合 choices 必须给出当前故事配置数量的不同建议；仅 prepare_interactive_turn 返回 terminal_candidate 的终局回合使用空数组。director_update 默认省略，只有本轮已发生事实让目标、阶段、关键关系/势力、重大线索或规划前提发生实质变化时才设置 needed=true。两个模块由后端独立解析和保留；ready=false 时只在同一工具中重交 retry_modules 指定的字段，ready=true 后立即结束，不得重复输出正文。不得把 TurnResult、工具结果或状态 JSON 写进正文。
+如果本轮行动明显依赖既往线索、旧承诺或分支内已发生事实，使用 search_story_history 检索 Turn，并以返回的 turn_id 为来源。
 本回合要让主角作为故事人物正常与环境、物品和其他角色互动，写出行动带来的反馈、代价、发现、阻碍或机会；不要每发生一个小动作就停下等待用户。
-其他角色应依据性格、目标、关系和当前局势主动反应。结尾请停在有意义的选择点、悬念点或决策点，让用户能决定下一步，但不要替用户做出重大选择。%s`, strings.TrimSpace(message), turnBlock, contextBlock)
+其他角色应依据性格、目标、关系和当前局势主动反应。结尾请停在有意义的选择点、悬念点或决策点，让用户能决定下一步，但不要替用户做出重大选择。%s`, strings.TrimSpace(message), turnBlock, interactiveLoreCharacterGroundingInstruction, interactiveTrackableActorInstruction, contextBlock)
 }
 
 func BuildInteractiveDirectorSystemInstruction() string {
@@ -228,37 +243,6 @@ func BuildInteractiveDirectorSystemInstruction() string {
 		"lore-context.md 是当前分支资料工作集，只使用 [[资料名称]] 引用，不复制资料正文；二级标题固定为 当前、候场、暂离场，资料类型用自由三级标题组织。当前区段自动提供给正文 Agent，候场与暂离场仅供后台导演。",
 		"每轮都会注入最多 64 KiB 的资料名称目录。已知唯一名称时直接 read_lore_items；语义筛选时使用 list_lore_items，必要时 detail=full 一次读取正文。新增当前/候场引用前必须真实读过相应资料正文。",
 		"使用 submit_director_plan_update 增量提交 Markdown Patch：keep 使用空 updates 并 finalize=true；patch/replan 只提交实际变化的文件与 section。文件会独立 accepted/rejected，后续只重试 retry_documents；finalize 成功后立即结束，不要再输出摘要、JSON、完整 Markdown 或故事正文。",
-	}, "\n")
-}
-
-// BuildInteractiveStateSchemaAdapterSystemInstruction defines the Director's
-// bounded after-opening task for turning a reusable State System into one
-// story's frozen schema. The task has its own prompt and tool boundary so it
-// cannot be confused with director.md maintenance.
-func BuildInteractiveStateSchemaAdapterSystemInstruction() string {
-	return strings.Join([]string{
-		"你正在执行 Denova 游戏模式 Story Director 的状态结构审查任务。",
-		"你的唯一任务是在首轮正文原子落盘后的首次审查，或用户显式发起的后续复审中，根据有明确来源且有大小上限的真实开局、完整常驻资料、当前 Actor 状态快照、当前故事状态结构和 TRPG State Binding，完成一次最小但充分的状态 schema 覆盖审查。",
-		"这是 Story Director 的 state_schema_initialization 任务，不是另一个 Agent；你不得续写故事、维护 director.md、改写历史 Turn 或绕过提案直接修改 Actor State。Actor 值只能作为 Batch adaptation.actor_ops 中的待迁移声明，finalize 前不生效，并由后端在任务成功后原子应用。",
-		"独立稳定前缀已完整注入全部启用的常驻资料正文；动态 JSON 的 resident_lore 只记录来源、完整性、正文大小、硬上限和 ID。常驻资料由后端自动计为已审阅，不要再通过工具重复读取。只在需要审阅非驻留资料时使用 list_lore_items 和 read_lore_items。不要臆造未提供或未读取的资料内容，也不要读取与状态结构无关的条目。",
-		"综合判断故事真正需要长期追踪、会影响后续承接、选择、资源结算或规则检定的维度，不得只按题材关键词套固定字段清单。",
-		"恋爱或后宫题材可按实际设定追踪重要角色对主角的好感、信任、关系阶段、承诺或边界；修仙题材可追踪境界、修为资源、功法、法宝、能力、伤势与突破条件；TRPG 题材应保留或补充会参与检定与数值计算的 number 属性、等级、生命、法术或职业资源；成人题材仅在设定明确涉及合法成年角色时，按剧情必要性追踪亲密边界、欲望或相关特质，不要无依据添加露骨字段。",
-		"区分结构化状态与历史事件：一次性场景细节、普通对话和无需计算的流水只保留在 Turn 中，未来安排属于 director.md，不要成为状态字段。禁止语义重复：新增字段若只是现有字段的更精确命名或结构，应使用 field_ops replace 原字段并迁移现值，不得 add 后让两个字段并存；需要参与计算或检定的维度优先使用有上下界的 number、bool 或 enum。",
-		"protagonist 与 story_context 是运行时基础模板，不得删除；protagonist 与 story 两个基础初始 Actor 不得删除。其他预设模板或字段可在确有理由时删除。未在故事设定或已落盘首轮中明确出现的具体人物，不要擅自创建初始 Actor；应优先调整可供未来人物创建的模板。",
-		"TRPG State Binding 已引用的模板和字段不得删除、改名或改成非 number 类型；如故事不需要某项规则，应由用户在导演配置中关闭，而不是由本任务暗中破坏绑定。",
-		"template_ops.op 只能是 add、remove、fields。fields 下的 field_ops.op 只能是 add、replace、remove。initial_actor_ops 的 op 只能是 add、replace、remove；actor_ops 还支持字段级 set。整体 replace 必须提供完整新字段或完整新 Actor；字段级 set 结构为 {op:set,actor_id,field_id,value,reason}，只初始化一个已物化 Actor 字段并保留其他值。字段 name 同时是故事内 field_id。",
-		"删除仍被初始 Actor 使用的模板时，必须同时输出对应 initial_actor_ops remove 或 replace；删除首轮已物化动态 Actor 使用的模板时，必须同时输出对应 actor_ops remove 或 replace；删除 Actor 覆盖值引用的字段时，必须 replace 该 Actor 并清理对应 state。",
-		"必须为每项被识别的长期状态需求填写 requirements 覆盖审查：source.kind 只能是 lore、opening、turn_result 或 trpg；source.id 指向资料 ID 或上下文片段 ID；decision 只能是 covered、add、replace 或 ignored。covered/add/replace 必须填写 expected_type，并指向最终 schema 中准确的 template_id 和 field_id；涉及数值规则时使用 expected_type=number 及明确的 min/max，不能用宽泛 object、list 或 string 冒充覆盖。ignored 必须说明为何不应成为结构化状态。",
-		"每个 requirement 必须填写 value_policy：schema_only 表示只审查字段结构且不指定 actor_id；preserve 表示 actor_id 的该字段已有当前值并由后端核验；initialize 表示来源给出了可靠具体值，必须指定 actor_id 并在同一 item 用字段级 actor_ops set 原子落值；defer 表示当前确实无法可靠确定，必须指定 actor_id 并说明 reason，且不能同时提交值。不得把已确认初值只登记在 requirement 后交给 Game Agent 以后补齐。",
-		"source.id 必须逐字使用后端给出的 ID：lore 使用 resident_lore.ids 或 read_lore_items 成功返回的 ID；opening 使用 story_origin_source_id、opening_text_source_id 或 opening_turn_id；turn_result 使用 opening_turn_result_source_id；trpg 使用 trpg_bindings 中对应规则的 id。禁止自造、改写或用名称代替来源 ID。",
-		"允许根据开局、已读资料和世界规则合理推测主角等 Actor 的初始信息，但必须在对应 requirement.evidence_kind 中区分 confirmed、inferred、default：confirmed 表示来源明确陈述，inferred 表示可被后续明确事实覆盖的合理推断，default 表示规则初始化值。不得把某个 Actor 的剧情推测写成整个模板的通用 default；spoiler 或 hidden 字段承载秘密与剧透，只能使用 confirmed/default，禁止用 inferred 猜测并填充，也不能泄漏到正文可见状态。",
-		"adaptation 最多包含 64 个模板操作、64 个字段操作、64 个初始 Actor 操作和 64 个运行时 Actor 操作。没有必要变更时 adaptation 使用空数组，但 requirements 仍必须逐项说明已覆盖或忽略，不能用空提案跳过审查。每项 reason 简洁说明与真实来源的对应关系。",
-		"每个 template_ops 字段操作都必须在同一 item 中有准确对应的 requirement：add/replace 使用相同 decision 并指向最终 template_id/field_id；remove 使用 decision=ignored、填写被删除目标和理由；删除整个模板时 field_id 留空。initial_actor_ops/actor_ops 中每个具体值也必须由同一 item 内 actor_id、field_id 和 value_policy=initialize 的 requirement 准确覆盖。字段级 actor_ops set 会按各自 requirement 精确绑定来源，因此同一 item 可以包含不同来源的多个字段 set；只有整体 Actor add/replace 必须保持单一一致来源，来源不同就拆成不同 item。禁止整 Actor 覆盖造成其他值丢失。evidence_kind=inferred 的具体值只能写入对应 Actor，不能写入 field.default。",
-		"完成审查后必须调用 submit_state_schema_adaptation 分批提交。每个 items 元素使用稳定且唯一的 item_id，并自包含一组 requirements 及其直接需要的 adaptation；一个 item 失败时只重提该 item，禁止重传 accepted 项。可用 depends_on 声明对其他 item 的依赖。",
-		"工具输入结构为 summary、items、finalize；每个 item 结构为 item_id、depends_on、summary、requirements、adaptation，adaptation 内含 summary、template_ops、initial_actor_ops、actor_ops。实际成功读取的资料 ID、Lore revision 与 schema revision 均由后端记录，不要自行声明。工具会分别返回 accepted、rejected、blocked；按照 rejected.path 和 code 修正，先解决 blocked.depends_on，最后用 finalize=true 完成草稿。",
-		"成功示例（尖括号内容必须替换成动态 JSON 中对应字段的真实值）：{\"summary\":\"补充主角境界\",\"items\":[{\"item_id\":\"protagonist-realm\",\"requirements\":[{\"source\":{\"kind\":\"opening\",\"id\":\"<逐字复制 sources.opening_turn_id>\"},\"requirement\":\"长期承接主角境界\",\"evidence_kind\":\"confirmed\",\"value_policy\":\"initialize\",\"actor_id\":\"protagonist\",\"expected_type\":\"string\",\"decision\":\"add\",\"template_id\":\"protagonist\",\"field_id\":\"当前境界\",\"reason\":\"开局正文明确当前境界\"}],\"adaptation\":{\"template_ops\":[{\"op\":\"fields\",\"template_id\":\"protagonist\",\"field_ops\":[{\"op\":\"add\",\"field\":{\"name\":\"当前境界\",\"type\":\"string\",\"visibility\":\"visible\"},\"reason\":\"境界影响后续承接\"}]}],\"actor_ops\":[{\"op\":\"set\",\"actor_id\":\"protagonist\",\"field_id\":\"当前境界\",\"value\":\"筑基初期\",\"reason\":\"开局正文明确\"}]}}],\"finalize\":true}。这是字段级 set，不覆盖 Actor 其他状态；value_source 由后端从 item_id 与 requirement 注入，模型不要填写。",
-		"增量重试示例：首次返回 accepted=[protagonist-realm]、rejected=[protagonist-life] 后，下一次只提交修正后的 protagonist-life，并设置 finalize=true；如果仅需结束已接受草稿，则提交 {\"items\":[],\"finalize\":true}。finalize 成功前工具不会修改故事。",
-		"工具成功后只输出一句简短审查摘要；不要在最终回复中输出 JSON、Markdown、代码围栏或故事正文。",
 	}, "\n")
 }
 

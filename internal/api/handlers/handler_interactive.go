@@ -67,6 +67,14 @@ func (h *Handlers) HandleInteractiveStoryUpdate(ctx context.Context, c *app.Requ
 	writeJSON(c, consts.StatusOK, story)
 }
 
+func (h *Handlers) HandleInteractiveStorySelect(ctx context.Context, c *app.RequestContext) {
+	if err := h.app.SelectInteractiveStory(c.Param("id")); err != nil {
+		writeError(c, consts.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(c, consts.StatusOK, map[string]string{"status": "ok"})
+}
+
 func (h *Handlers) HandleInteractiveStoryDelete(ctx context.Context, c *app.RequestContext) {
 	if err := h.app.DeleteInteractiveStory(c.Param("id")); err != nil {
 		writeError(c, consts.StatusBadRequest, err.Error())
@@ -82,33 +90,6 @@ func (h *Handlers) HandleInteractiveSnapshot(ctx context.Context, c *app.Request
 		return
 	}
 	writeJSON(c, consts.StatusOK, snapshot)
-}
-
-func (h *Handlers) HandleInteractiveStateSchemaRun(ctx context.Context, c *app.RequestContext) {
-	status, err := h.app.RetryInteractiveStateSchema(c.Param("id"))
-	if err != nil {
-		writeError(c, consts.StatusConflict, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusAccepted, status)
-}
-
-func (h *Handlers) HandleInteractiveStateSchemaReview(ctx context.Context, c *app.RequestContext) {
-	status, err := h.app.ReviewInteractiveStateSchema(c.Param("id"))
-	if err != nil {
-		writeError(c, consts.StatusConflict, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusAccepted, status)
-}
-
-func (h *Handlers) HandleInteractiveStateSchemaSkip(ctx context.Context, c *app.RequestContext) {
-	status, err := h.app.SkipInteractiveStateSchema(c.Param("id"))
-	if err != nil {
-		writeError(c, consts.StatusConflict, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, status)
 }
 
 func (h *Handlers) HandleInteractiveRuleResolutionReroll(ctx context.Context, c *app.RequestContext) {

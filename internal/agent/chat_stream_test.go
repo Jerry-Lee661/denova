@@ -9,6 +9,68 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+func TestProcessStreamingEventPreservesProviderThinkingVerbatim(t *testing.T) {
+	reader, writer := schema.Pipe[*schema.Message](1)
+	rawThinking := "开局：" + strings.Repeat("规划目标、约束与状态。", 300) + "供应商思考尾部必须完整展示"
+	writer.Send(&schema.Message{Role: schema.Assistant, ReasoningContent: rawThinking}, nil)
+	writer.Close()
+
+	var content strings.Builder
+	var thinking strings.Builder
+	var events []Event
+	_, err := processStreamingEvent(
+		context.Background(),
+		&adk.MessageVariant{IsStreaming: true, MessageStream: reader, Role: schema.Assistant},
+		&content,
+		&thinking,
+		0,
+		0,
+		agentEventMetadata{AgentKind: AgentKindInteractiveStory},
+		nil,
+		func(event Event) { events = append(events, event) },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := thinking.String(); got != rawThinking {
+		t.Fatalf("provider thinking was changed: got_bytes=%d want_bytes=%d\ngot_tail=%q", len(got), len(rawThinking), got[max(0, len(got)-80):])
+	}
+	if len(events) != 1 || events[0].Type != "thinking" || eventDataString(events[0].Data, "content") != rawThinking {
+		t.Fatalf("visible thinking must match the provider output verbatim: %#v", events)
+	}
+}
+
+func TestProcessNonStreamingEventPreservesToolArgumentsVerbatim(t *testing.T) {
+	rawArgs := `{"path":"chapters/ch01.md","content":"` + strings.Repeat("正文", 300) + `工具输入尾部必须完整展示"}`
+	message := &schema.Message{Role: schema.Assistant, ToolCalls: []schema.ToolCall{{
+		ID: "call-write",
+		Function: schema.FunctionCall{
+			Name:      "write_file",
+			Arguments: rawArgs,
+		},
+	}}}
+	var content strings.Builder
+	var thinking strings.Builder
+	var events []Event
+
+	processNonStreamingEvent(
+		&adk.MessageVariant{Message: message, Role: schema.Assistant},
+		&content,
+		&thinking,
+		0,
+		agentEventMetadata{},
+		nil,
+		func(event Event) { events = append(events, event) },
+	)
+
+	if len(events) != 1 || events[0].Type != "tool_call" {
+		t.Fatalf("tool call event = %#v", events)
+	}
+	if got := eventDataString(events[0].Data, "args"); got != rawArgs {
+		t.Fatalf("tool arguments were changed: got_bytes=%d want_bytes=%d\ngot=%q", len(got), len(rawArgs), got)
+	}
+}
+
 func TestProcessStreamingEventReclassifiesInteractiveToolPreambleAsThinking(t *testing.T) {
 	reader, writer := schema.Pipe[*schema.Message](3)
 	writer.Send(&schema.Message{Role: schema.Assistant, Content: "我先检查资料，再开始写正文。"}, nil)
@@ -32,7 +94,6 @@ func TestProcessStreamingEventReclassifiesInteractiveToolPreambleAsThinking(t *t
 		0,
 		0,
 		agentEventMetadata{AgentKind: AgentKindInteractiveStory},
-		false,
 		nil,
 		func(event Event) { events = append(events, event) },
 	)
@@ -50,7 +111,7 @@ func TestProcessStreamingEventReclassifiesInteractiveToolPreambleAsThinking(t *t
 	}
 }
 
-func TestProcessStreamingEventStreamsInteractiveCandidateBeforeTurnResult(t *testing.T) {
+func TestProcessStreamingEventStreamsFirstInteractiveNarrativeCandidate(t *testing.T) {
 	reader, writer := schema.Pipe[*schema.Message](1)
 	writer.Send(&schema.Message{Role: schema.Assistant, Content: "夜雨落在青石街上。"}, nil)
 	writer.Close()
@@ -66,7 +127,6 @@ func TestProcessStreamingEventStreamsInteractiveCandidateBeforeTurnResult(t *tes
 		0,
 		0,
 		agentEventMetadata{AgentKind: AgentKindInteractiveStory},
-		false,
 		nil,
 		func(event Event) { events = append(events, event) },
 	)
@@ -74,7 +134,7 @@ func TestProcessStreamingEventStreamsInteractiveCandidateBeforeTurnResult(t *tes
 		t.Fatal(err)
 	}
 	if got := content.String(); got != "夜雨落在青石街上。" {
-		t.Fatalf("pre-TurnResult candidate = %q", got)
+		t.Fatalf("first narrative candidate = %q", got)
 	}
 	if thinking.Len() != 0 {
 		t.Fatalf("candidate leaked into thinking: %q", thinking.String())
@@ -84,12 +144,13 @@ func TestProcessStreamingEventStreamsInteractiveCandidateBeforeTurnResult(t *tes
 	}
 }
 
-func TestProcessStreamingEventStreamsInteractiveNarrativeAfterTurnResult(t *testing.T) {
+func TestProcessStreamingEventKeepsFirstInteractiveCandidateWhenLaterProseArrives(t *testing.T) {
 	reader, writer := schema.Pipe[*schema.Message](1)
-	writer.Send(&schema.Message{Role: schema.Assistant, Content: "夜雨落在青石街上。"}, nil)
+	writer.Send(&schema.Message{Role: schema.Assistant, Content: "废弃料场里又出现了另一段正文。"}, nil)
 	writer.Close()
 
 	var content strings.Builder
+	content.WriteString("乱石坡上的首个正文候选。")
 	var thinking strings.Builder
 	var events []Event
 	_, err := processStreamingEvent(
@@ -100,21 +161,47 @@ func TestProcessStreamingEventStreamsInteractiveNarrativeAfterTurnResult(t *test
 		0,
 		0,
 		agentEventMetadata{AgentKind: AgentKindInteractiveStory},
-		true,
 		nil,
 		func(event Event) { events = append(events, event) },
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := content.String(); got != "夜雨落在青石街上。" {
-		t.Fatalf("narrative = %q", got)
+	if got := content.String(); got != "乱石坡上的首个正文候选。" {
+		t.Fatalf("later prose replaced the locked candidate: %q", got)
 	}
-	if thinking.Len() != 0 {
-		t.Fatalf("final narrative leaked into thinking: %q", thinking.String())
+	if got := thinking.String(); got != "废弃料场里又出现了另一段正文。" {
+		t.Fatalf("later prose thinking = %q", got)
 	}
-	if len(events) != 1 || events[0].Type != "chunk" {
-		t.Fatalf("final narrative event = %#v, want chunk", events)
+	if len(events) != 1 || events[0].Type != "thinking" {
+		t.Fatalf("later prose event = %#v, want thinking", events)
+	}
+}
+
+func TestProcessNonStreamingEventKeepsFirstInteractiveCandidateWhenLaterProseArrives(t *testing.T) {
+	var content strings.Builder
+	content.WriteString("乱石坡上的首个正文候选。")
+	var thinking strings.Builder
+	var events []Event
+
+	processNonStreamingEvent(
+		&adk.MessageVariant{Message: schema.AssistantMessage("废弃料场里又出现了另一段正文。", nil), Role: schema.Assistant},
+		&content,
+		&thinking,
+		0,
+		agentEventMetadata{AgentKind: AgentKindInteractiveStory},
+		nil,
+		func(event Event) { events = append(events, event) },
+	)
+
+	if got := content.String(); got != "乱石坡上的首个正文候选。" {
+		t.Fatalf("later prose replaced the locked candidate: %q", got)
+	}
+	if got := thinking.String(); got != "废弃料场里又出现了另一段正文。" {
+		t.Fatalf("later prose thinking = %q", got)
+	}
+	if len(events) != 1 || events[0].Type != "thinking" {
+		t.Fatalf("later prose event = %#v, want thinking", events)
 	}
 }
 
@@ -142,7 +229,6 @@ func TestProcessStreamingEventKeepsInteractiveCompletionRetryInternal(t *testing
 		0,
 		0,
 		agentEventMetadata{AgentKind: AgentKindInteractiveStory},
-		false,
 		nil,
 		func(event Event) { events = append(events, event) },
 	)
@@ -186,7 +272,6 @@ func TestProcessStreamingEventKeepsContentBeforeSubmitAsNarrative(t *testing.T) 
 		0,
 		0,
 		agentEventMetadata{AgentKind: AgentKindInteractiveStory},
-		false,
 		nil,
 		func(event Event) { events = append(events, event) },
 	)

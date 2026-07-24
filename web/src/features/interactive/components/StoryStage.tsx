@@ -46,6 +46,7 @@ import { appendBufferedLiveMessage, bindLiveToolEventKeys, findMappedLiveToolId,
 import { useIsMobile } from '@/hooks/useIsMobile'
 import { useKeyboardInset } from '@/hooks/useKeyboardInset'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { createRafUpdateBatcher } from '@/lib/streaming/raf-update-batcher'
 
 interface StoryStageProps {
   workspace?: string
@@ -66,7 +67,7 @@ interface StoryStageProps {
   onStorySelect?: (storyId: string) => void
   onStoryCreate?: (input: StoryCreateInput) => void | Promise<void>
   onStorySetupUpdate?: (input: StoryCreateInput) => void | Promise<void>
-  onStoryDelete?: (storyId: string) => void
+  onStoryDelete?: (storyIds: string[]) => void | Promise<void>
   onDirectorChange?: (directorId: string) => void
   onReplyTargetCharsChange?: (replyTargetChars: number) => void | Promise<void>
   onImageSettingsChange?: (settings: StoryImageSettings) => void | Promise<void>
@@ -119,8 +120,9 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
   })
   const snapshotKey = storyStageSnapshotKey(storyId, branchId, snapshot)
   const stageKey = `${workspace || 'current'}:${storyId || 'none'}:${branchId || snapshot?.branch_id || 'main'}`
-  const { storyStageRuns, setStoryStageRun, clearStoryStageRun } = useInteractiveStore()
-  const stageRun = storyStageRuns[stageKey] || EMPTY_STAGE_RUN
+  const stageRun = useInteractiveStore((state) => state.storyStageRuns[stageKey] || EMPTY_STAGE_RUN)
+  const setStoryStageRun = useInteractiveStore((state) => state.setStoryStageRun)
+  const clearStoryStageRun = useInteractiveStore((state) => state.clearStoryStageRun)
   const streaming = stageRun.streaming
   const activityContent = stageRun.activityContent
   const liveMessages = stageRun.liveMessages
@@ -231,6 +233,11 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
     [updateStageRun],
   )
 
+  const toolArgsBatcher = useMemo(
+    () => createRafUpdateBatcher<ChatMessage[]>(setStageLiveMessages),
+    [setStageLiveMessages],
+  )
+
   const latestLiveTurn = useMemo(() => {
     if (liveMessages.length === 0) return null
     const user = liveMessages.find((msg) => msg.role === 'user')?.content || ''
@@ -302,8 +309,9 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
         liveMessagePromoteRafRef.current = null
       }
       liveMessageBufferRef.current = []
+      toolArgsBatcher.discard()
     }
-  }, [])
+  }, [toolArgsBatcher])
 
   useEffect(() => {
     if (activeSkillCommandIndex >= filteredSkillCommands.length) setActiveSkillCommandIndex(0)
@@ -651,7 +659,7 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
 
   function prepareLiveStoryRun(message: string, nextRewindTurnId?: string) {
     setStageActivityContent(t('storyStage.activity.thinking'))
-    flushLiveMessageBuffer()
+    flushLiveUpdates()
     liveToolKeyToMessageIdRef.current = {}
     nonNarrativeLiveMessageStreamingRef.current = false
     const liveTurnRenderKeys = createLiveTurnRenderKeys()
@@ -705,7 +713,7 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
         }
         case 'tool_call': {
           const data = JSON.parse(value.data)
-          flushLiveMessageBuffer()
+          flushLiveUpdates()
           appendToolCallMessage(data)
           setStageActivityContent(t('storyStage.activity.processingTool', {
             name: data.name || t('storyStage.activity.toolCall'),
@@ -720,7 +728,7 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
         }
         case 'tool_result': {
           const data = JSON.parse(value.data)
-          flushLiveMessageBuffer()
+          flushLiveUpdates()
           updateToolCallMessage(data, 'success', data.content || '')
           appendLiveRuleRollMessage(data)
           setStageActivityContent('')
@@ -728,7 +736,7 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
         }
         case 'context_compaction': {
           const data = JSON.parse(value.data)
-          flushLiveMessageBuffer()
+          flushLiveUpdates()
           appendContextCompactionMessage(data)
           setStageActivityContent('')
           if (data.status === 'completed' || data.status === 'failed') currentCompactionMessageIdRef.current = null
@@ -736,13 +744,13 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
         }
         case 'token_usage': {
           const data = JSON.parse(value.data)
-          flushLiveMessageBuffer()
+          flushLiveUpdates()
           setStageLiveMessages((prev) => upsertTokenUsageMessage(prev, buildTokenUsageMessage(data)))
           break
         }
         case 'interactive_turn_persisted': {
           const data = JSON.parse(value.data) as InteractiveTurnPersistedEvent
-          flushLiveMessageBuffer()
+          flushLiveUpdates()
           receivedPersistedTurn = true
           if (data.turn?.id && currentLiveTurnRenderKeysRef.current) {
             turnRenderKeysRef.current[data.turn.id] = currentLiveTurnRenderKeysRef.current
@@ -753,7 +761,7 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
         }
         case 'error': {
           const data = JSON.parse(value.data)
-          flushLiveMessageBuffer()
+          flushLiveUpdates()
           finishLiveMessages()
           setStageActivityContent('')
           streamFailed = true
@@ -809,7 +817,7 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
   }
 
   function handleInteractiveStreamError(error: unknown) {
-    flushLiveMessageBuffer()
+    flushLiveUpdates()
     finishLiveMessages()
     setStageActivityContent('')
     setStageLiveMessages((prev) => [
@@ -1163,7 +1171,7 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
 
   const stageControls = (
     <>
-      <StoryPicker stories={stories} currentStoryId={storyId} onSelect={(id) => { setCreatingStory(false); setEditingStorySetup(false); onStorySelect(id) }} onCreate={() => { setEditingStorySetup(false); setCreatingStory(true) }} onDelete={onStoryDelete} />
+      <StoryPicker stories={stories} currentStoryId={storyId} onSelect={(id) => { setStageControlsOpen(false); setCreatingStory(false); setEditingStorySetup(false); onStorySelect(id) }} onCreate={() => { setStageControlsOpen(false); setEditingStorySetup(false); setCreatingStory(true) }} onDeleteStories={onStoryDelete} />
       {isMobile ? <StoryDirectorPicker story={story} storyDirectors={storyDirectors} onChange={onDirectorChange} /> : null}
       {isMobile ? <ReplyTargetCharsControl story={story} onChange={onReplyTargetCharsChange} /> : null}
       {onToggleDirectorPanel && (
@@ -1554,6 +1562,7 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
               }
               toolbarEnd={
                 <>
+                  <ModelProfileSwitcher agentKey="interactive_story" workspace={workspace} disabled={streaming || directorBlocking} />
                   <Button type="button" variant="outline" className={`nova-agent-composer-pill h-8 shrink-0 rounded-[10px] border-[var(--nova-border)] bg-[var(--nova-surface)] px-2.5 text-[11px] text-[var(--nova-text-muted)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text)] ${hotChoicesExpanded ? 'text-[var(--nova-text)]' : ''}`} disabled={!canUseHotChoices} onMouseDown={(event) => event.preventDefault()} onClick={toggleHotChoices} aria-label={hotChoicesExpanded ? t('storyStage.hotChoices.collapse') : t('storyStage.hotChoices.get')} title={hotChoicesExpanded ? t('storyStage.hotChoices.collapse') : t('storyStage.hotChoices.get')}>
                     <Compass className="h-3.5 w-3.5" />
                     {!isMobile ? t('storyStage.hotChoices.button') : null}
@@ -1563,7 +1572,6 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
                       <Plus className="h-3.5 w-3.5" />
                     </Button>
                   ) : null}
-                  <ModelProfileSwitcher agentKey="interactive_story" workspace={workspace} disabled={streaming || directorBlocking} />
                 </>
               }
               submitControl={
@@ -1632,7 +1640,7 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
 
   // 思考前言被误当正文显示时（孤立 </think>），丢弃这条流式 assistant 消息，正文随后另起。
   function resetAssistantMessage() {
-    flushLiveMessageBuffer()
+    flushLiveUpdates()
     setStageLiveMessages((prev) => {
       const last = prev[prev.length - 1]
       if (last?.role === 'assistant' && last.streaming) {
@@ -1666,9 +1674,14 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
     if (buffered.length === 0) return
     liveMessageBufferRef.current = []
     setStageLiveMessages((prev) => buffered.reduce(appendBufferedLiveMessage, prev))
-    if (buffered.some((message) => message.role === 'assistant')) {
+    if (buffered.some((message) => message.role === 'assistant' || message.role === 'thinking')) {
       scheduleLiveMessagePromotion()
     }
+  }
+
+  function flushLiveUpdates() {
+    flushLiveMessageBuffer()
+    toolArgsBatcher.flush()
   }
 
   function scheduleLiveMessagePromotion() {
@@ -1710,7 +1723,7 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
 
   function appendToolArgsDelta(payload: Record<string, unknown> & { id?: string; name?: string; args?: string; delta?: string }) {
     if (!payload.id && !payload.name && liveToolEventKeys(payload).length === 0) return
-    setStageLiveMessages((prev) => {
+    toolArgsBatcher.enqueue((prev) => {
       const targetIndex = findToolMessageIndexForPayload(prev, payload, liveToolKeyToMessageIdRef.current)
       if (targetIndex < 0) return prev
       const matchedId = prev[targetIndex].id
@@ -1770,7 +1783,7 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
 
   function collapseNonNarrativeMessages() {
     if (!nonNarrativeLiveMessageStreamingRef.current) return
-    flushLiveMessageBuffer()
+    flushLiveUpdates()
     nonNarrativeLiveMessageStreamingRef.current = false
     setStageLiveMessages((prev) =>
       prev.map((msg) =>
@@ -1785,7 +1798,7 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
   }
 
   function finishLiveMessages() {
-    flushLiveMessageBuffer()
+    flushLiveUpdates()
     if (liveMessagePromoteRafRef.current !== null) {
       window.cancelAnimationFrame(liveMessagePromoteRafRef.current)
       liveMessagePromoteRafRef.current = null

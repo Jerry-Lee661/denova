@@ -10,15 +10,12 @@ const maxActorStateSchemaAdaptationOps = 64
 
 const (
 	StateSchemaInitializationWaitingOpening = "waiting_opening"
-	StateSchemaInitializationRunning        = "running"
 	StateSchemaInitializationReady          = "ready"
-	StateSchemaInitializationFailed         = "failed"
-	StateSchemaInitializationSkipped        = "skipped"
 )
 
 // ActorStateSchemaAdaptation is a bounded story-local diff over a reusable
-// State System. It is proposed after the opening or during an explicit later
-// review; the backend migrates materialized state before freezing the result.
+// State System. The opening Game Agent proposes it before any state is
+// materialized, and the backend validates it before freezing the result.
 type ActorStateSchemaAdaptation struct {
 	Summary         string                           `json:"summary,omitempty"`
 	TemplateOps     []ActorStateTemplateSchemaOp     `json:"template_ops,omitempty"`
@@ -30,21 +27,21 @@ type ActorStateSchemaAdaptation struct {
 // operations to one existing template. Existing template metadata and trait
 // rules remain stable when only FieldOps are supplied.
 type ActorStateTemplateSchemaOp struct {
-	Op         string                    `json:"op"`
-	TemplateID string                    `json:"template_id,omitempty"`
-	Template   ActorStateTemplate        `json:"template,omitempty"`
-	FieldOps   []ActorStateFieldSchemaOp `json:"field_ops,omitempty"`
-	Reason     string                    `json:"reason,omitempty"`
+	Op         string                    `json:"op" jsonschema:"enum=add,enum=remove,enum=fields" jsonschema_description:"add 新增完整 template；remove 删除 template_id；fields 对现有 template_id 应用 field_ops。"`
+	TemplateID string                    `json:"template_id,omitempty" jsonschema_description:"remove/fields 必填，逐字使用现有 Template ID。"`
+	Template   ActorStateTemplate        `json:"template,omitempty" jsonschema_description:"仅 add 必填的完整新模板。"`
+	FieldOps   []ActorStateFieldSchemaOp `json:"field_ops,omitempty" jsonschema:"maxItems=64" jsonschema_description:"仅 fields 使用；每项为 add/replace/remove。"`
+	Reason     string                    `json:"reason,omitempty" jsonschema_description:"为什么本故事需要此最小结构变化。"`
 }
 
 // ActorStateFieldSchemaOp uses add, replace, or remove. FieldID identifies the
 // existing field for replace/remove; Field contains the complete new field for
 // add/replace.
 type ActorStateFieldSchemaOp struct {
-	Op      string          `json:"op"`
-	FieldID string          `json:"field_id,omitempty"`
-	Field   ActorStateField `json:"field,omitempty"`
-	Reason  string          `json:"reason,omitempty"`
+	Op      string          `json:"op" jsonschema:"enum=add,enum=replace,enum=remove" jsonschema_description:"字段操作类型。"`
+	FieldID string          `json:"field_id,omitempty" jsonschema_description:"replace/remove 必填，逐字使用现有 Field ID。"`
+	Field   ActorStateField `json:"field,omitempty" jsonschema_description:"add/replace 必填的完整字段定义。"`
+	Reason  string          `json:"reason,omitempty" jsonschema_description:"为什么本故事需要此字段变化。"`
 }
 
 // ActorStateInitialActorSchemaOp uses add, replace, or remove for story-local
@@ -73,10 +70,9 @@ type ActorStateRuntimeSchemaOp struct {
 // ActorStateSchemaActorValueSource links Actor values produced by a Batch item
 // to the exact requirement evidence persisted in the schema adaptation audit.
 type ActorStateSchemaActorValueSource struct {
-	SourceID     string                            `json:"source_id"`
-	ItemID       string                            `json:"item_id"`
-	Source       ActorStateSchemaRequirementSource `json:"source"`
-	EvidenceKind string                            `json:"evidence_kind"`
+	SourceID string                            `json:"source_id"`
+	ItemID   string                            `json:"item_id"`
+	Source   ActorStateSchemaRequirementSource `json:"source"`
 }
 
 // ActorStateSchemaAdaptationRecord is persisted with the frozen story schema
@@ -97,7 +93,7 @@ type ActorStateSchemaAdaptationRecord struct {
 }
 
 // ActorStateSchemaAdaptationChange is a bounded user-visible audit item for
-// one schema or initial-Actor change proposed by the initialization Director.
+// one schema change proposed by the opening Game Agent.
 type ActorStateSchemaAdaptationChange struct {
 	Kind        string                            `json:"kind"`
 	Op          string                            `json:"op"`
@@ -109,8 +105,9 @@ type ActorStateSchemaAdaptationChange struct {
 	ValueSource *ActorStateSchemaActorValueSource `json:"value_source,omitempty"`
 }
 
-// StateSchemaInitializationStatus is story-global because all branches share
-// one frozen Actor State contract.
+// StateSchemaInitializationStatus tracks the foreground opening handshake. It
+// never represents a background Director task because all branches share one
+// schema that is frozen with the first committed turn.
 type StateSchemaInitializationStatus struct {
 	Mode            string                              `json:"mode"`
 	Status          string                              `json:"status"`
@@ -119,7 +116,6 @@ type StateSchemaInitializationStatus struct {
 	BaseRevision    int                                 `json:"base_revision,omitempty"`
 	TargetRevision  int                                 `json:"target_revision,omitempty"`
 	Summary         string                              `json:"summary,omitempty"`
-	Error           string                              `json:"error,omitempty"`
 	LoreRevision    string                              `json:"lore_revision,omitempty"`
 	ReviewedLoreIDs []string                            `json:"reviewed_lore_ids,omitempty"`
 	Requirements    []ActorStateSchemaRequirementReview `json:"requirements,omitempty"`
@@ -174,16 +170,16 @@ func ParseActorStateSchemaAdaptation(content string) (ActorStateSchemaAdaptation
 	for index := range adaptation.InitialActorOps {
 		op := &adaptation.InitialActorOps[index]
 		op.Op = strings.TrimSpace(op.Op)
-		op.ActorID = normalizeActorStateID(op.ActorID)
+		op.ActorID = normalizeStatePanelActorID(op.ActorID)
 		op.Reason = trimBytes(op.Reason, maxInteractiveTextBytes)
 		normalizeActorStateSchemaActorValueSource(op.ValueSource)
 	}
 	for index := range adaptation.ActorOps {
 		op := &adaptation.ActorOps[index]
 		op.Op = strings.TrimSpace(op.Op)
-		op.ActorID = normalizeActorStateID(op.ActorID)
+		op.ActorID = normalizeStatePanelActorID(op.ActorID)
 		op.FieldID = normalizeActorStateFieldName(op.FieldID)
-		op.Actor.ID = normalizeActorStateID(op.Actor.ID)
+		op.Actor.ID = normalizeStatePanelActorID(op.Actor.ID)
 		op.Actor.TemplateID = normalizeActorStateID(op.Actor.TemplateID)
 		op.Reason = trimBytes(op.Reason, maxInteractiveTextBytes)
 		normalizeActorStateSchemaActorValueSource(op.ValueSource)
@@ -205,11 +201,10 @@ func normalizeActorStateSchemaActorValueSource(source *ActorStateSchemaActorValu
 	source.ItemID = strings.TrimSpace(source.ItemID)
 	source.Source.Kind = strings.TrimSpace(source.Source.Kind)
 	source.Source.ID = strings.TrimSpace(source.Source.ID)
-	source.EvidenceKind = strings.TrimSpace(source.EvidenceKind)
 }
 
-// ApplyActorStateSchemaAdaptation applies a Director-proposed initialization
-// diff and validates the complete State System plus every frozen TRPG binding.
+// ApplyActorStateSchemaAdaptation applies a Game Agent schema diff and validates
+// the complete State System plus every frozen TRPG binding.
 func ApplyActorStateSchemaAdaptation(base StoryDirectorActorStateSystem, trpg StoryDirectorTRPGSystem, adaptation ActorStateSchemaAdaptation) (StoryDirectorActorStateSystem, ActorStateSchemaAdaptationRecord, error) {
 	system := normalizeActorStateSystem(base)
 	requireProtagonistTemplate := actorStateTemplateByID(system, DefaultActorID).ID != ""
@@ -244,7 +239,7 @@ func ApplyActorStateSchemaAdaptation(base StoryDirectorActorStateSystem, trpg St
 		fieldOps += len(op.FieldOps)
 	}
 	record := ActorStateSchemaAdaptationRecord{
-		Source:          "director_agent",
+		Source:          "game_agent",
 		Summary:         trimBytes(adaptation.Summary, maxInteractiveTextBytes),
 		TemplateOps:     len(adaptation.TemplateOps),
 		FieldOps:        fieldOps,
@@ -370,7 +365,7 @@ func applyActorStateInitialActorSchemaOp(system StoryDirectorActorStateSystem, o
 	switch op.Op {
 	case "add":
 		actor := op.Actor
-		actor.ID = normalizeActorStateID(actor.ID)
+		actor.ID = normalizeStatePanelActorID(actor.ID)
 		if actor.ID == "" {
 			return system, fmt.Errorf("新增初始 Actor 缺少合法 actor.id")
 		}
@@ -387,11 +382,11 @@ func applyActorStateInitialActorSchemaOp(system StoryDirectorActorStateSystem, o
 			return system, fmt.Errorf("替换的初始 Actor 不存在: %s", op.ActorID)
 		}
 		actor := op.Actor
-		actor.ID = normalizeActorStateID(actor.ID)
+		actor.ID = normalizeStatePanelActorID(actor.ID)
 		if actor.ID == "" {
-			actor.ID = normalizeActorStateID(op.ActorID)
+			actor.ID = normalizeStatePanelActorID(op.ActorID)
 		}
-		if actor.ID != normalizeActorStateID(op.ActorID) {
+		if actor.ID != normalizeStatePanelActorID(op.ActorID) {
 			return system, fmt.Errorf("替换初始 Actor 时不可改变 ID: %s -> %s", op.ActorID, actor.ID)
 		}
 		if actorStateTemplateByID(system, actor.TemplateID).ID == "" {
@@ -399,7 +394,7 @@ func applyActorStateInitialActorSchemaOp(system StoryDirectorActorStateSystem, o
 		}
 		system.InitialActors[index] = actor
 	case "remove":
-		actorID := normalizeActorStateID(op.ActorID)
+		actorID := normalizeStatePanelActorID(op.ActorID)
 		if actorID == DefaultActorID || actorID == DefaultStoryContextActorID {
 			return system, fmt.Errorf("故事基础初始 Actor 不可删除: %s", actorID)
 		}
@@ -438,9 +433,9 @@ func actorStateFieldIndex(fields []ActorStateField, fieldID string) int {
 }
 
 func actorStateInitialActorIndex(actors []ActorStateInitialActor, actorID string) int {
-	actorID = normalizeActorStateID(actorID)
+	actorID = normalizeStatePanelActorID(actorID)
 	for index := range actors {
-		if normalizeActorStateID(actors[index].ID) == actorID {
+		if normalizeStatePanelActorID(actors[index].ID) == actorID {
 			return index
 		}
 	}

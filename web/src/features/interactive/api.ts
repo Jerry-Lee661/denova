@@ -1,6 +1,6 @@
 import { fetchAPI, jsonHeaders, parseSSEStream, requestJSON } from '@/lib/api-client'
 import type { ContextAnalysis, InteractiveImage } from '@/lib/api-client'
-import type { ActorStateModule, ActorTraitRollRequest, ActorTraitRollResult, BranchSummary, DirectorPlan, DirectorPlanStatus, EventPackageModule, ImagePreset, InitialActorTraitRoll, InteractiveSSEEvent, RuleResolution, RuleResolutionRerollInput, RuleSystemModule, Snapshot, StateSchemaInitializationStatus, StoryDirector, StoryDirectorModuleRefs, StyleReference, StyleReferenceFileDocument, StoryImageSettings, StoryIndex, StoryOpeningConfig, StorySummary, Teller, UpdateDirectorPlanInput, UpdateTurnNarrativeResult } from './types'
+import type { ActorStateModule, ActorTraitRollRequest, ActorTraitRollResult, BranchSummary, DirectorPlan, DirectorPlanStatus, EventPackageModule, ImagePreset, InitialActorTraitRoll, InteractiveSSEEvent, RuleResolution, RuleResolutionRerollInput, RuleSystemModule, Snapshot, StoryDirector, StoryDirectorModuleRefs, StoryDirectorRunPolicy, StoryStateSchemaPolicy, StyleReference, StyleReferenceFileDocument, StoryImageSettings, StoryIndex, StoryOpeningConfig, StorySummary, Teller, UpdateDirectorPlanInput, UpdateTurnNarrativeResult } from './types'
 
 function presetMutationBody<T extends object>(input: T, baseRevision?: string, workspace?: string) {
   return {
@@ -14,7 +14,7 @@ export function getInteractiveStories(): Promise<StoryIndex> {
   return requestJSON('/api/interactive/stories')
 }
 
-export function createInteractiveStory(input: { title: string; origin?: string; story_teller_id: string; story_director_id?: string; module_refs?: StoryDirectorModuleRefs; reply_target_chars?: number; choice_count?: number; image_settings?: StoryImageSettings; opening?: StoryOpeningConfig; initial_trait_rolls?: InitialActorTraitRoll[] }): Promise<StorySummary> {
+export function createInteractiveStory(input: { title: string; origin?: string; story_teller_id: string; story_director_id?: string; director_run_policy?: StoryDirectorRunPolicy; module_refs?: StoryDirectorModuleRefs; reply_target_chars?: number; choice_count?: number; image_settings?: StoryImageSettings; opening?: StoryOpeningConfig; initial_trait_rolls?: InitialActorTraitRoll[]; state_schema_policy?: StoryStateSchemaPolicy }): Promise<StorySummary> {
   return requestJSON('/api/interactive/stories', {
     method: 'POST',
     headers: jsonHeaders,
@@ -37,17 +37,25 @@ export function updateInteractiveStory(
     origin?: string
     story_teller_id?: string
     story_director_id?: string
+    director_run_policy?: StoryDirectorRunPolicy
     module_refs?: StoryDirectorModuleRefs
     reply_target_chars?: number
     choice_count?: number
     image_settings?: StoryImageSettings
     opening?: StoryOpeningConfig
+    state_schema_policy?: StoryStateSchemaPolicy
   },
 ): Promise<StorySummary> {
   return requestJSON(`/api/interactive/stories/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: jsonHeaders,
     body: JSON.stringify(input),
+  })
+}
+
+export function selectInteractiveStory(id: string): Promise<void> {
+  return requestJSON(`/api/interactive/stories/${encodeURIComponent(id)}/select`, {
+    method: 'POST',
   })
 }
 
@@ -60,18 +68,6 @@ export function deleteInteractiveStory(id: string): Promise<void> {
 export function getInteractiveSnapshot(storyId: string, branchId?: string): Promise<Snapshot> {
   const query = branchId ? `?branch=${encodeURIComponent(branchId)}` : ''
   return requestJSON(`/api/interactive/stories/${encodeURIComponent(storyId)}/snapshot${query}`)
-}
-
-export function retryInteractiveStateSchema(storyId: string): Promise<StateSchemaInitializationStatus> {
-  return requestJSON(`/api/interactive/stories/${encodeURIComponent(storyId)}/state-schema/run`, { method: 'POST' })
-}
-
-export function reviewInteractiveStateSchema(storyId: string): Promise<StateSchemaInitializationStatus> {
-  return requestJSON(`/api/interactive/stories/${encodeURIComponent(storyId)}/state-schema/review`, { method: 'POST' })
-}
-
-export function skipInteractiveStateSchema(storyId: string): Promise<StateSchemaInitializationStatus> {
-  return requestJSON(`/api/interactive/stories/${encodeURIComponent(storyId)}/state-schema/skip`, { method: 'POST' })
 }
 
 export function rerollInteractiveRuleResolution(storyId: string, resolutionId: string, input: RuleResolutionRerollInput = {}): Promise<RuleResolution> {

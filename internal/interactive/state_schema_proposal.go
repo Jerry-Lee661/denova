@@ -16,14 +16,8 @@ const (
 	ActorStateSchemaValuePolicyDefer      = "defer"
 )
 
-const (
-	StateSchemaLoreReadMaxItemsPerCall = 4
-	StateSchemaLoreReadMaxResultBytes  = DirectorContextMaxBytes
-	StateSchemaLoreReadMaxTotalBytes   = 2 * StateSchemaLoreReadMaxResultBytes
-)
-
-// ActorStateSchemaProposal is the Director-owned, backend-validated review
-// submitted after the opening or during an explicit later re-review.
+// ActorStateSchemaProposal is the backend-validated, run-local opening schema
+// draft produced by the foreground Game Agent.
 type ActorStateSchemaProposal struct {
 	Summary      string                              `json:"summary,omitempty"`
 	Requirements []ActorStateSchemaRequirementReview `json:"requirements,omitempty"`
@@ -32,7 +26,7 @@ type ActorStateSchemaProposal struct {
 	// than accepted from the model.
 	ReviewedLoreIDs []string `json:"-"`
 	// SourceLoreRevision is captured by the app, not supplied by the model.
-	// It records which lore catalog the Director reviewed.
+	// It records which lore catalog the opening Game Agent reviewed.
 	SourceLoreRevision string `json:"-"`
 }
 
@@ -51,9 +45,6 @@ type ActorStateSchemaRequirementReview struct {
 	ItemID      string                            `json:"item_id,omitempty" jsonschema:"-"`
 	Source      ActorStateSchemaRequirementSource `json:"source"`
 	Requirement string                            `json:"requirement"`
-	// EvidenceKind preserves whether the requirement or proposed initial value
-	// is explicitly confirmed, reasonably inferred, or a rules-level default.
-	EvidenceKind string `json:"evidence_kind"`
 	// ValuePolicy makes Actor value handling explicit instead of treating a
 	// sourced schema requirement as if it had also initialized runtime state.
 	ValuePolicy  string   `json:"value_policy" jsonschema:"description=该需求的 Actor 值策略：schema_only 仅审查结构；preserve 校验并保留已有值；initialize 必须在同一 item 用字段级 actor_ops set 落值；defer 明确延后且必须说明理由"`
@@ -67,8 +58,8 @@ type ActorStateSchemaRequirementReview struct {
 	Reason       string   `json:"reason,omitempty"`
 }
 
-// ActorStateSchemaProposalPreview is returned to the Director after validating
-// a staged proposal. Applying it remains the Store's responsibility.
+// ActorStateSchemaProposalPreview describes a validated, run-local opening
+// draft. Persisting it remains the Store's responsibility.
 type ActorStateSchemaProposalPreview struct {
 	Summary         string `json:"summary,omitempty"`
 	TemplateOps     int    `json:"template_ops,omitempty"`
@@ -119,6 +110,24 @@ func ValidateActorStateSchemaProposal(base StoryDirectorActorStateSystem, trpg S
 	}, nil
 }
 
+// ValidateOpeningGameStateSchemaProposal enforces the Game Agent boundary:
+// this tool may only define templates and fields. Actor creation and values
+// belong to submit_interactive_turn.state_changes in the same atomic commit.
+func ValidateOpeningGameStateSchemaProposal(base StoryDirectorActorStateSystem, trpg StoryDirectorTRPGSystem, proposal ActorStateSchemaProposal) (ActorStateSchemaProposal, ActorStateSchemaProposalPreview, error) {
+	if len(proposal.Adaptation.InitialActorOps) > 0 {
+		return ActorStateSchemaProposal{}, ActorStateSchemaProposalPreview{}, fmt.Errorf("开局 Game Agent 状态结构提案不能修改 initial_actors；请用 state_changes create 创建 Actor")
+	}
+	if len(proposal.Adaptation.ActorOps) > 0 {
+		return ActorStateSchemaProposal{}, ActorStateSchemaProposalPreview{}, fmt.Errorf("开局 Game Agent 状态结构提案不能写 Actor 值；请用 submit_interactive_turn.state_changes 初始化")
+	}
+	for _, requirement := range proposal.Requirements {
+		if strings.TrimSpace(requirement.ValuePolicy) != ActorStateSchemaValuePolicySchemaOnly {
+			return ActorStateSchemaProposal{}, ActorStateSchemaProposalPreview{}, fmt.Errorf("开局 Game Agent 状态结构需求只能使用 value_policy=schema_only")
+		}
+	}
+	return ValidateActorStateSchemaProposal(base, trpg, proposal)
+}
+
 func validateActorStateSchemaRequirementReviews(proposal *ActorStateSchemaProposal, target StoryDirectorActorStateSystem) error {
 	if proposal == nil {
 		return fmt.Errorf("状态结构提案不存在")
@@ -135,9 +144,8 @@ func validateActorStateSchemaRequirementReviews(proposal *ActorStateSchemaPropos
 		review.Source.Kind = strings.TrimSpace(review.Source.Kind)
 		review.Source.ID = strings.TrimSpace(review.Source.ID)
 		review.Requirement = trimBytes(review.Requirement, maxInteractiveTextBytes)
-		review.EvidenceKind = strings.TrimSpace(review.EvidenceKind)
 		review.ValuePolicy = strings.TrimSpace(review.ValuePolicy)
-		review.ActorID = normalizeActorStateID(review.ActorID)
+		review.ActorID = normalizeStatePanelActorID(review.ActorID)
 		review.ExpectedType = strings.TrimSpace(review.ExpectedType)
 		review.Decision = strings.TrimSpace(review.Decision)
 		review.TemplateID = normalizeActorStateID(review.TemplateID)
@@ -153,11 +161,6 @@ func validateActorStateSchemaRequirementReviews(proposal *ActorStateSchemaPropos
 		}
 		if review.Source.Kind == "lore" && !reviewedLore[review.Source.ID] {
 			return fmt.Errorf("状态需求引用了未经后端确认审阅的资料: %s", review.Source.ID)
-		}
-		switch review.EvidenceKind {
-		case "confirmed", "inferred", "default":
-		default:
-			return fmt.Errorf("状态需求 evidence_kind 无效: %s", review.EvidenceKind)
 		}
 		switch review.ValuePolicy {
 		case ActorStateSchemaValuePolicySchemaOnly:
@@ -206,9 +209,6 @@ func validateActorStateSchemaRequirementReviews(proposal *ActorStateSchemaPropos
 		}
 		if review.ExpectedType != "" && field.Type != review.ExpectedType {
 			return fmt.Errorf("状态需求字段类型不匹配: template=%s field=%s expected=%s actual=%s", review.TemplateID, review.FieldID, review.ExpectedType, field.Type)
-		}
-		if review.EvidenceKind == "inferred" && (field.Visibility == "spoiler" || field.Visibility == "hidden") {
-			return fmt.Errorf("推测信息不能填充秘密或剧透状态字段: template=%s field=%s visibility=%s", review.TemplateID, review.FieldID, field.Visibility)
 		}
 		if review.Min != nil && (field.Min == nil || *field.Min != *review.Min) {
 			return fmt.Errorf("状态需求字段 min 不匹配: template=%s field=%s", review.TemplateID, review.FieldID)

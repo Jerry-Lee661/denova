@@ -1,10 +1,19 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError } from '@/lib/api-client'
+import { preserveAutosaveConflict } from '@/lib/api-client/autosave-conflicts'
 import type { LayeredSettings, Settings, SettingsLayer } from './types'
 import { useLayeredSettingsDraft } from './use-layered-settings-draft'
 
+vi.mock('@/lib/api-client/autosave-conflicts', () => ({
+  preserveAutosaveConflict: vi.fn(async () => ({ id: 'conflict-1', path: '/conflicts/conflict-1.json', storage: 'server' as const })),
+}))
+
 describe('useLayeredSettingsDraft', () => {
+  beforeEach(() => {
+    vi.mocked(preserveAutosaveConflict).mockClear()
+  })
+
   afterEach(() => {
     vi.useRealTimers()
   })
@@ -169,6 +178,55 @@ describe('useLayeredSettingsDraft', () => {
     expect(result.current.draft).toEqual({ language: 'en-US' })
   })
 
+  it('treats its own save response as an acknowledgement while a newer draft waits', async () => {
+    const initial = snapshot({
+      user: { model_profiles: [{ id: 'default', openai_model: 'model-a' }] },
+      revisions: { user: 'r1' },
+    })
+    const firstSave = deferred<LayeredSettings>()
+    const secondSave = deferred<LayeredSettings>()
+    const loadSettings = vi.fn(async () => initial)
+    const saveUserSettings = vi.fn()
+      .mockImplementationOnce(() => firstSave.promise)
+      .mockImplementationOnce(() => secondSave.promise)
+    const { result, unmount } = renderHook(() => useLayeredSettingsDraft({
+      layer: 'user',
+      sourcePrefix: 'test-settings',
+      loadSettings,
+      saveUserSettings,
+      saveWorkspaceSettings: vi.fn(),
+    }))
+    await waitFor(() => expect(result.current.draft).toEqual(initial.user))
+    vi.useFakeTimers()
+
+    act(() => result.current.setDraft({ model_profiles: [{ id: 'default', openai_model: 'model-b' }] }))
+    act(() => { vi.advanceTimersByTime(1100) })
+    expect(saveUserSettings).toHaveBeenCalledOnce()
+
+    act(() => result.current.setDraft({ model_profiles: [{ id: 'default', openai_model: 'model-c' }] }))
+    const firstSaved = snapshot({
+      user: { model_profiles: [{ id: 'default', openai_model: 'model-b' }] },
+      revisions: { user: 'r2' },
+    })
+    await act(async () => {
+      firstSave.resolve(firstSaved)
+      await firstSave.promise
+      await Promise.resolve()
+    })
+
+    const conflictCallCount = vi.mocked(preserveAutosaveConflict).mock.calls.length
+    const currentDraft = result.current.draft
+    act(() => { vi.advanceTimersByTime(1100) })
+    const queuedSave = saveUserSettings.mock.calls[1]
+    unmount()
+
+    expect(conflictCallCount).toBe(0)
+    expect(queuedSave).toEqual([{
+      model_profiles: [{ id: 'default', openai_model: 'model-c' }],
+    }, 'r2'])
+    expect(currentDraft).toEqual({ model_profiles: [{ id: 'default', openai_model: 'model-c' }] })
+  })
+
   it('applies external snapshots without writing them back when there is no local edit', async () => {
     const initial = snapshot({ user: { language: 'zh-CN', theme: 'dark' }, revisions: { user: 'r1' } })
     const external = snapshot({ user: { language: 'zh-CN', theme: 'light' }, revisions: { user: 'r2' } })
@@ -235,6 +293,35 @@ describe('useLayeredSettingsDraft', () => {
         image: { profile_id: 'image-b' },
       },
     }, 'r2')
+  })
+
+  it('archives an overlapping external edit before keeping the local settings value', async () => {
+    const initial = snapshot({ user: { theme: 'dark' }, revisions: { user: 'r1' } })
+    const external = snapshot({ user: { theme: 'light' }, revisions: { user: 'r2' } })
+    const loadSettings = vi.fn().mockResolvedValueOnce(initial).mockResolvedValueOnce(external)
+    const { result } = renderHook(() => useLayeredSettingsDraft({
+      layer: 'user',
+      sourcePrefix: 'test-settings',
+      loadSettings,
+      saveUserSettings: vi.fn(),
+      saveWorkspaceSettings: vi.fn(),
+    }))
+    await waitFor(() => expect(result.current.draft).toEqual(initial.user))
+
+    act(() => result.current.setDraft({ theme: 'system' }))
+    act(() => window.dispatchEvent(new CustomEvent('nova:settings-updated', { detail: { source: 'other-view' } })))
+
+    await waitFor(() => expect(result.current.draft).toEqual({ theme: 'system' }))
+    expect(preserveAutosaveConflict).toHaveBeenCalledWith(expect.objectContaining({
+      resource: 'settings',
+      scope: 'test-settings:user',
+      id: 'user',
+      base: { revision: 'r1', value: { theme: 'dark' } },
+      local: { revision: 'r1', value: { theme: 'system' } },
+      external: { revision: 'r2', value: { theme: 'light' } },
+      merged: { revision: 'r2', value: { theme: 'system' } },
+      conflict_paths: [['theme']],
+    }))
   })
 
   it('uses the autosave queue for manual save and clears the pending timer', async () => {

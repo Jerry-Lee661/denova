@@ -9,13 +9,12 @@ import type { ActorStateField, ActorStateTemplate } from '../../../../types'
 import type { ExplorerProps } from '../types'
 import { fieldNodeId } from '../build-tree'
 import { FieldTypeBadge } from '../shared/FieldTypeBadge'
-import { VisibilityBadge } from '../shared/VisibilityBadge'
 import { StateValueEditor } from '../shared/StateValueEditor'
 import { DetailResponsiveGrid, DetailStack } from './DetailLayout'
 import { actorStateFieldNameHasPathSeparator } from '../validation'
 
 const FIELD_TYPES = ['number', 'string', 'bool', 'enum', 'object', 'list'] as const
-const VISIBILITY_OPTIONS = ['visible', 'hidden', 'spoiler'] as const
+const DISPLAY_OPTIONS = ['auto', 'stat', 'inline', 'block', 'list'] as const
 
 interface FieldDetailEditorProps {
   field: ActorStateField
@@ -68,7 +67,6 @@ export function FieldDetailEditor({
         className="flex flex-wrap items-center gap-2"
       >
         <FieldTypeBadge type={field.type} />
-        {field.visibility ? <VisibilityBadge visibility={field.visibility} /> : null}
         <span className="text-[10px] text-[var(--nova-text-faint)]">{t('settingPanel.actorState.explorer.nameIsId')}</span>
       </motion.div>
 
@@ -106,7 +104,7 @@ export function FieldDetailEditor({
 				</div>
 			)}
 
-          <div className="grid gap-3 sm:grid-cols-2">
+          <div className="grid gap-3">
             <FormField label={t('settingPanel.actorState.explorer.type')}>
               <Select
                 value={field.type}
@@ -124,19 +122,30 @@ export function FieldDetailEditor({
                 </SelectContent>
               </Select>
             </FormField>
-            <FormField label={t('settingPanel.actorState.explorer.visibility')}>
+          </div>
+
+          <div className="grid gap-3 sm:grid-cols-2">
+            <FormField label={t('settingPanel.actorState.explorer.displayGroup')}>
+              <Input
+                className="nova-field h-8 text-xs focus-visible:ring-0"
+                value={field.group || ''}
+                onChange={(e) => updateField({ group: e.target.value })}
+                placeholder={t('settingPanel.actorState.explorer.displayGroupPlaceholder')}
+              />
+            </FormField>
+            <FormField label={t('settingPanel.actorState.explorer.display')}>
               <Select
-                value={field.visibility || 'visible'}
-                onValueChange={(v) => updateField({ visibility: v as ActorStateField['visibility'] })}
+                value={field.display || 'auto'}
+                onValueChange={(v) => updateField({ display: v === 'auto' ? undefined : v as ActorStateField['display'] })}
               >
                 <SelectTrigger className="nova-field h-8 text-xs focus:ring-0">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent className="nova-panel border text-[var(--nova-text)]">
                   <SelectGroup>
-                    {VISIBILITY_OPTIONS.map((visibility) => (
-                      <SelectItem key={visibility} value={visibility}>
-                        {t(`settingPanel.actorState.explorer.${visibility}`)}
+                    {DISPLAY_OPTIONS.map((display) => (
+                      <SelectItem key={display} value={display}>
+                        {t(`settingPanel.actorState.explorer.display.${display}`)}
                       </SelectItem>
                     ))}
                   </SelectGroup>
@@ -156,7 +165,7 @@ export function FieldDetailEditor({
                 transition={{ duration: 0.15, ease: novaEase }}
                 className="overflow-hidden"
               >
-                <div className="grid gap-3 pt-1 sm:grid-cols-3">
+                <div className="grid gap-3 pt-1 sm:grid-cols-2">
                   <FormField label={t('settingPanel.actorState.explorer.minimum')}>
                     <Input
                       className="nova-field h-8 text-xs focus-visible:ring-0"
@@ -171,14 +180,6 @@ export function FieldDetailEditor({
                       inputMode="decimal"
                       value={field.max !== undefined ? String(field.max) : ''}
                       onChange={(e) => updateField({ max: parseNumberInput(e.target.value) })}
-                    />
-                  </FormField>
-                  <FormField label={t('settingPanel.actorState.explorer.order')}>
-                    <Input
-                      className="nova-field h-8 text-xs focus-visible:ring-0"
-                      inputMode="numeric"
-                      value={field.order !== undefined ? String(field.order) : ''}
-                      onChange={(e) => updateField({ order: parseNumberInput(e.target.value) })}
                     />
                   </FormField>
                 </div>
@@ -227,6 +228,7 @@ export function FieldDetailEditor({
               </span>
             </div>
             <StateValueEditor
+              key={`${template.id}:${fieldIndex}:${field.type}`}
               type={field.type}
               value={field.default}
               onChange={(v) => updateField({ default: v })}

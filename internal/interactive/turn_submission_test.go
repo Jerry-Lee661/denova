@@ -84,6 +84,53 @@ func TestPrepareTurnSubmissionRejectsStateModuleAtomically(t *testing.T) {
 	}
 }
 
+func TestPrepareTurnSubmissionRequiresCompleteOpeningInitialState(t *testing.T) {
+	oxygenMin := float64(0)
+	oxygenMax := float64(100)
+	system := StoryDirectorActorStateSystem{
+		Templates: []ActorStateTemplate{
+			{ID: DefaultActorID, Fields: []ActorStateField{
+				{Name: "身份", Type: "string"},
+				{Name: "氧气", Type: "number", Default: 45, Min: &oxygenMin, Max: &oxygenMax},
+			}},
+			{ID: ActorStateStoryContextTemplateID, Fields: []ActorStateField{
+				{Name: storyContextCurrentLocationField, Type: "string"},
+				{Name: storyContextCurrentEventField, Type: "string"},
+			}},
+		},
+		InitialActors: []ActorStateInitialActor{
+			{ID: DefaultActorID, Name: "主角", TemplateID: DefaultActorID},
+			{ID: DefaultStoryContextActorID, Name: "故事状态", TemplateID: ActorStateStoryContextTemplateID},
+		},
+	}
+	state, err := BuildActorStateInitialSnapshot(system, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	incomplete := []StateUpdate{
+		{Op: TurnStateUpdateReplace, Path: "/story/当前详细地点", Value: "维护舱"},
+		{Op: TurnStateUpdateReplace, Path: "/story/当前事件", Value: "站体持续泄漏"},
+	}
+	choices := testTurnChoices()
+	prepared, receipt := PrepareTurnSubmission(TurnSubmissionContext{
+		ActorState: system, CurrentState: state, ChoiceCount: 5, RequireCompleteInitialState: true,
+	}, nil, TurnSubmissionInput{StateUpdates: &incomplete, Choices: &choices})
+	if receipt.Ready || receipt.ModuleStatus.StateChanges != TurnSubmissionModuleRejected || receipt.ModuleStatus.Choices != TurnSubmissionModuleAccepted {
+		t.Fatalf("an incomplete opening state must reject only state_changes: %#v", receipt)
+	}
+	if len(receipt.Diagnostics) != 1 || receipt.Diagnostics[0].Code != TurnSubmissionDiagnosticInitialStateIncomplete || !strings.Contains(receipt.Diagnostics[0].MessageZH, "protagonist/身份") {
+		t.Fatalf("opening diagnostic must identify the missing field: %#v", receipt.Diagnostics)
+	}
+
+	complete := append([]StateUpdate{{Op: TurnStateUpdateReplace, Path: "/protagonist/身份", Value: "潜水工程师"}}, incomplete...)
+	prepared, receipt = PrepareTurnSubmission(TurnSubmissionContext{
+		ActorState: system, CurrentState: state, ChoiceCount: 5, RequireCompleteInitialState: true,
+	}, prepared, TurnSubmissionInput{StateUpdates: &complete})
+	if !receipt.Ready || !prepared.Ready() || receipt.ModuleStatus.StateChanges != TurnSubmissionModuleAccepted || len(prepared.TurnResult().Choices) != 5 {
+		t.Fatalf("initializing every missing field should complete the retained choices: receipt=%#v result=%#v", receipt, prepared.TurnResult())
+	}
+}
+
 func TestUnifiedTurnSubmissionDecodesStructuredStateChangesAndIsolatesFailures(t *testing.T) {
 	system, state := turnSubmissionTestState()
 	complete := DecodeInteractiveTurnSubmissionInput(`{"state_changes":[{"op":"replace","actor_id":"protagonist","field_id":"当前处境","value":"废弃哨站"}],"choices":["左路","右路","检查地图","询问同伴","原地观察"]}`)
@@ -100,6 +147,11 @@ func TestUnifiedTurnSubmissionDecodesStructuredStateChangesAndIsolatesFailures(t
 	}
 	if !strings.Contains(string(receiptJSON), `"state_changes":"accepted"`) || strings.Contains(string(receiptJSON), "actor_state_patches") {
 		t.Fatalf("model-facing receipt should use the unified state_changes vocabulary: %s", receiptJSON)
+	}
+
+	serialized := DecodeInteractiveTurnSubmissionInput(`{"state_changes":"[{\"op\":\"replace\",\"actor_id\":\"protagonist\",\"field_id\":\"当前处境\",\"value\":\"废弃哨站\"}]"}`)
+	if serialized.StateUpdates == nil || len(*serialized.StateUpdates) != 1 || (*serialized.StateUpdates)[0].Path != "/protagonist/当前处境" || len(serialized.Diagnostics) != 0 {
+		t.Fatalf("one-layer string-encoded array should be decoded without losing the intended state fact: %#v", serialized)
 	}
 
 	malformed := DecodeInteractiveTurnSubmissionInput(`{"state_changes":"not-an-array","choices":["左路","右路","检查地图","询问同伴","原地观察"]}`)
@@ -123,8 +175,8 @@ func TestUnifiedTurnSubmissionDecodesStructuredStateChangesAndIsolatesFailures(t
 func TestUnifiedTurnSubmissionSupportsObjectSubpathsAndExplicitActorCreation(t *testing.T) {
 	system := StoryDirectorActorStateSystem{
 		Templates: []ActorStateTemplate{
-			{ID: "protagonist", Fields: []ActorStateField{{Name: "关系", Type: "object", Visibility: "visible"}}},
-			{ID: "important_character", Fields: []ActorStateField{{Name: "状态", Type: "string", Visibility: "visible"}}},
+			{ID: "protagonist", Fields: []ActorStateField{{Name: "关系", Type: "object"}}},
+			{ID: "important_character", Fields: []ActorStateField{{Name: "状态", Type: "string"}}},
 		},
 	}
 	state := map[string]any{"actors": map[string]any{
@@ -133,7 +185,7 @@ func TestUnifiedTurnSubmissionSupportsObjectSubpathsAndExplicitActorCreation(t *
 			"state": map[string]any{"关系": map[string]any{}},
 		},
 	}}
-	input := DecodeInteractiveTurnSubmissionInput(`{"state_changes":[{"op":"replace","actor_id":"protagonist","field_id":"关系","subpath":["盟友/敌人","信任~值"],"value":3},{"op":"create","actor_id":"npc_guard","template_id":"important_character","name":"守门人","initial_state":{"状态":"警惕"}}],"choices":["前进","观察","交谈","等待","后退"]}`)
+	input := DecodeInteractiveTurnSubmissionInput(`{"state_changes":[{"op":"replace","actor_id":"protagonist","field_id":"关系","subpath":["盟友/敌人","信任~值"],"value":3},{"op":"create","actor_id":"守门人","template_id":"important_character","name":"守门人","initial_state":{"状态":"警惕"}}],"choices":["前进","观察","交谈","等待","后退"]}`)
 	if input.StateUpdates == nil || len(*input.StateUpdates) != 2 {
 		t.Fatalf("structured state changes were not decoded: %#v", input)
 	}
@@ -143,6 +195,30 @@ func TestUnifiedTurnSubmissionSupportsObjectSubpathsAndExplicitActorCreation(t *
 	prepared, receipt := PrepareTurnSubmission(TurnSubmissionContext{ActorState: system, CurrentState: state, ChoiceCount: 5}, nil, input)
 	if !receipt.Ready || !prepared.Ready() || len(prepared.TurnResult().StateUpdates) != 2 {
 		t.Fatalf("object update and explicit create should compile atomically: receipt=%#v result=%#v", receipt, prepared.TurnResult())
+	}
+}
+
+func TestUnifiedTurnSubmissionDecodesActorArchiveAndRestore(t *testing.T) {
+	input := DecodeInteractiveTurnSubmissionInput(`{"state_changes":[{"op":"archive","actor_id":"狼王","reason":"本回合已确认死亡"},{"op":"restore","actor_id":"失踪斥候","reason":"确认幸存并重新登场"}]}`)
+	if input.StateUpdates == nil || len(*input.StateUpdates) != 2 || len(input.Diagnostics) != 0 {
+		t.Fatalf("actor lifecycle changes should decode as one valid state module: %#v", input)
+	}
+	archive := (*input.StateUpdates)[0]
+	if archive.Op != TurnStateUpdateArchive || archive.Path != "/狼王" {
+		t.Fatalf("unexpected archive update: %#v", archive)
+	}
+	archiveValue, ok := archive.Value.(map[string]any)
+	if !ok || archiveValue["reason"] != "本回合已确认死亡" {
+		t.Fatalf("archive reason should survive structured decoding: %#v", archive.Value)
+	}
+	restore := (*input.StateUpdates)[1]
+	if restore.Op != TurnStateUpdateRestore || restore.Path != "/失踪斥候" {
+		t.Fatalf("unexpected restore update: %#v", restore)
+	}
+
+	invalid := DecodeInteractiveTurnSubmissionInput(`{"state_changes":[{"op":"archive","actor_id":"狼王"}]}`)
+	if invalid.StateUpdates != nil || len(invalid.Diagnostics) != 1 || invalid.Diagnostics[0].Path != "/state_changes/0" {
+		t.Fatalf("archive without a reason should be rejected at the lifecycle operation: %#v", invalid)
 	}
 }
 
@@ -230,8 +306,8 @@ func turnSubmissionTestState() (StoryDirectorActorStateSystem, map[string]any) {
 	system := StoryDirectorActorStateSystem{Templates: []ActorStateTemplate{{
 		ID: "protagonist",
 		Fields: []ActorStateField{
-			{Name: "当前处境", Type: "string", Visibility: "visible"},
-			{Name: "生命值", Type: "number", Visibility: "visible"},
+			{Name: "当前处境", Type: "string"},
+			{Name: "生命值", Type: "number"},
 		},
 	}}}
 	state := map[string]any{"actors": map[string]any{

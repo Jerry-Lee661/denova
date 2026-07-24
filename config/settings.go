@@ -1,17 +1,16 @@
 package config
 
 import (
-	"bytes"
-	"crypto/sha256"
+	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 
 	toml "github.com/pelletier/go-toml/v2"
 
+	"denova/internal/revisionfile"
 	"denova/internal/workspacepath"
 )
 
@@ -63,8 +62,6 @@ type Settings struct {
 	ChapterGroupMax             *int   `toml:"chapter_group_max,omitempty" json:"chapter_group_max,omitempty"`
 	VersionTimedEnabled         *bool  `toml:"version_timed_enabled,omitempty" json:"version_timed_enabled,omitempty"`
 	VersionTimedIntervalMinutes *int   `toml:"version_timed_interval_minutes,omitempty" json:"version_timed_interval_minutes,omitempty"`
-	VersionAgentEnabled         *bool  `toml:"version_agent_enabled,omitempty" json:"version_agent_enabled,omitempty"`
-	VersionAgentCharThreshold   *int   `toml:"version_agent_char_threshold,omitempty" json:"version_agent_char_threshold,omitempty"`
 
 	// 外观
 	UIFontFamily       string `toml:"ui_font_family,omitempty" json:"ui_font_family,omitempty"`
@@ -134,8 +131,6 @@ func DefaultSettings() Settings {
 		ChapterGroupMax:             intPtr(8),
 		VersionTimedEnabled:         boolPtr(true),
 		VersionTimedIntervalMinutes: intPtr(10),
-		VersionAgentEnabled:         boolPtr(true),
-		VersionAgentCharThreshold:   intPtr(3000),
 		UIFontFamily:                "apple-system",
 		UIFontSize:                  intPtr(14),
 		ReadingFontFamily:           "source-han-serif",
@@ -152,10 +147,11 @@ func DefaultSettings() Settings {
 		TraceExporter:               DefaultTraceExporter,
 		TraceRetentionRuns:          intPtr(DefaultTraceRetentionRuns),
 		AgentModels: AgentModelSettings{
-			IDE:            AgentModelOverride{EnableThinking: boolPtr(true)},
-			ConfigManager:  AgentModelOverride{EnableThinking: boolPtr(true)},
-			VersionSummary: AgentModelOverride{EnableThinking: boolPtr(false)},
-			ToolAgent:      AgentModelOverride{EnableThinking: boolPtr(false)},
+			IDE:              AgentModelOverride{EnableThinking: boolPtr(true)},
+			InteractiveStory: AgentModelOverride{EnableThinking: boolPtr(false)},
+			ConfigManager:    AgentModelOverride{EnableThinking: boolPtr(true)},
+			VersionSummary:   AgentModelOverride{EnableThinking: boolPtr(false)},
+			ToolAgent:        AgentModelOverride{EnableThinking: boolPtr(false)},
 		},
 		AgentTools:                 DefaultAgentToolSettings(),
 		AgentSkills:                AgentSkillSettings{},
@@ -264,12 +260,6 @@ func Merge(parent, child Settings) Settings {
 	}
 	if child.VersionTimedIntervalMinutes != nil {
 		out.VersionTimedIntervalMinutes = child.VersionTimedIntervalMinutes
-	}
-	if child.VersionAgentEnabled != nil {
-		out.VersionAgentEnabled = child.VersionAgentEnabled
-	}
-	if child.VersionAgentCharThreshold != nil {
-		out.VersionAgentCharThreshold = child.VersionAgentCharThreshold
 	}
 	if child.UIFontFamily != "" {
 		out.UIFontFamily = child.UIFontFamily
@@ -403,13 +393,17 @@ type SettingsRuntime struct {
 
 // ReadSettingsFile 读取 TOML，文件不存在时返回零值且无错误。
 func ReadSettingsFile(path string) (Settings, error) {
-	data, err := os.ReadFile(path)
+	snapshot, err := revisionfile.Read(context.Background(), path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return Settings{}, nil
-		}
 		return Settings{}, fmt.Errorf("读取 %s 失败: %w", path, err)
 	}
+	if !snapshot.Exists {
+		return Settings{}, nil
+	}
+	return decodeSettingsFile(path, snapshot.Content)
+}
+
+func decodeSettingsFile(path string, data []byte) (Settings, error) {
 	var s Settings
 	if err := toml.Unmarshal(data, &s); err != nil {
 		return Settings{}, fmt.Errorf("解析 %s 失败: %w", path, err)
@@ -425,43 +419,76 @@ func WriteSettingsFile(path string, s Settings) error {
 // WriteSettingsFileIfRevision 写入配置；expectedRevision 非空时要求磁盘文件未被外部改动。
 // 当序列化内容与磁盘现有内容完全一致时跳过写入，避免频繁空写。
 func WriteSettingsFileIfRevision(path string, s Settings, expectedRevision string) error {
-	if expectedRevision != "" {
-		current, err := SettingsFileRevision(path)
-		if err != nil {
-			return err
-		}
-		if current != expectedRevision {
-			return ErrSettingsRevisionConflict
-		}
-	}
-	s = sanitizeEditableSettings(s)
-	data, err := toml.Marshal(s)
+	data, err := toml.Marshal(sanitizeEditableSettings(s))
 	if err != nil {
 		return fmt.Errorf("序列化失败: %w", err)
 	}
-	if existing, readErr := os.ReadFile(path); readErr == nil && bytes.Equal(existing, data) {
-		return ErrSettingsUnchanged
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("创建目录失败: %w", err)
-	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if _, err := revisionfile.ReplaceIfRevision(
+		context.Background(),
+		path,
+		expectedRevision,
+		data,
+		revisionfile.Options{FileMode: 0o644, DirectoryMode: 0o755},
+	); err != nil {
+		if errors.Is(err, revisionfile.ErrRevisionConflict) {
+			return ErrSettingsRevisionConflict
+		}
 		return fmt.Errorf("写入 %s 失败: %w", path, err)
 	}
 	return nil
 }
 
+// MutateSettingsFile locks one settings path across reading, preparing and
+// committing the next TOML snapshot. Callers use it for read-modify-write
+// policies that must not be prepared from stale settings.
+func MutateSettingsFile(
+	path string,
+	expectedRevision string,
+	mutate func(Settings) (Settings, error),
+) (string, error) {
+	if mutate == nil {
+		return "", errors.New("settings mutator is nil")
+	}
+	result, err := revisionfile.Mutate(
+		context.Background(),
+		path,
+		revisionfile.Options{FileMode: 0o644, DirectoryMode: 0o755},
+		func(snapshot revisionfile.Snapshot) ([]byte, error) {
+			if expectedRevision != "" && snapshot.Revision != expectedRevision {
+				return nil, ErrSettingsRevisionConflict
+			}
+			current := Settings{}
+			if snapshot.Exists {
+				var decodeErr error
+				current, decodeErr = decodeSettingsFile(path, snapshot.Content)
+				if decodeErr != nil {
+					return nil, decodeErr
+				}
+			}
+			next, mutateErr := mutate(current)
+			if mutateErr != nil {
+				return nil, mutateErr
+			}
+			data, marshalErr := toml.Marshal(sanitizeEditableSettings(next))
+			if marshalErr != nil {
+				return nil, fmt.Errorf("序列化失败: %w", marshalErr)
+			}
+			return data, nil
+		},
+	)
+	if err != nil {
+		return "", err
+	}
+	return result.Revision, nil
+}
+
 // SettingsFileRevision 返回配置文件内容版本；缺失文件使用 stable sentinel。
 func SettingsFileRevision(path string) (string, error) {
-	data, err := os.ReadFile(path)
+	snapshot, err := revisionfile.Read(context.Background(), path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return "missing", nil
-		}
 		return "", fmt.Errorf("读取 %s 版本失败: %w", path, err)
 	}
-	sum := sha256.Sum256(data)
-	return fmt.Sprintf("sha256:%x", sum), nil
+	return snapshot.Revision, nil
 }
 
 // UserConfigPath 计算用户级配置路径。novaDir 已经过 normalizePath 处理。

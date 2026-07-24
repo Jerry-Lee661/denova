@@ -18,13 +18,14 @@ const (
 	TurnSubmissionModuleRejected = "rejected"
 	TurnSubmissionModuleMissing  = "missing"
 
-	TurnSubmissionDiagnosticInvalidJSON          = "invalid_json"
-	TurnSubmissionDiagnosticInvalidTopLevel      = "invalid_top_level"
-	TurnSubmissionDiagnosticInvalidModule        = "invalid_module"
-	TurnSubmissionDiagnosticChoiceCountMismatch  = "choice_count_mismatch"
-	TurnSubmissionDiagnosticDuplicateChoice      = "duplicate_choice"
-	TurnSubmissionDiagnosticEmptyChoice          = "empty_choice"
-	TurnSubmissionDiagnosticStoryContextRequired = "story_context_required"
+	TurnSubmissionDiagnosticInvalidJSON            = "invalid_json"
+	TurnSubmissionDiagnosticInvalidTopLevel        = "invalid_top_level"
+	TurnSubmissionDiagnosticInvalidModule          = "invalid_module"
+	TurnSubmissionDiagnosticChoiceCountMismatch    = "choice_count_mismatch"
+	TurnSubmissionDiagnosticDuplicateChoice        = "duplicate_choice"
+	TurnSubmissionDiagnosticEmptyChoice            = "empty_choice"
+	TurnSubmissionDiagnosticStoryContextRequired   = "story_context_required"
+	TurnSubmissionDiagnosticInitialStateIncomplete = "initial_state_incomplete"
 
 	turnSubmissionSeverityError = "error"
 
@@ -78,11 +79,12 @@ type TurnSubmissionInput struct {
 // TurnSubmissionContext contains all story-scoped validation inputs. IDs and
 // current state are backend-bound and never supplied by the model.
 type TurnSubmissionContext struct {
-	ActorState               StoryDirectorActorStateSystem
-	CurrentState             map[string]any
-	ChoiceCount              int
-	RuleResolution           *RuleResolution
-	RuleStateConsumptionMode string
+	ActorState                  StoryDirectorActorStateSystem
+	CurrentState                map[string]any
+	ChoiceCount                 int
+	RuleResolution              *RuleResolution
+	RuleStateConsumptionMode    string
+	RequireCompleteInitialState bool
 }
 
 // PreparedTurnSubmission holds accepted modules while failed modules are
@@ -147,19 +149,37 @@ func PrepareTurnSubmission(validation TurnSubmissionContext, current *PreparedTu
 	}
 	if input.StateUpdates != nil && !prepared.stateUpdatesAccepted && !rejected[TurnSubmissionModuleStateChanges] {
 		updates := normalizeTurnStateUpdates(*input.StateUpdates)
-		compiled, err := CompileTurnStateUpdates(validation.ActorState, validation.CurrentState, updates, TurnStateUpdateCompileOptions{
+		compileOptions := TurnStateUpdateCompileOptions{
 			RuleResolution:           validation.RuleResolution,
 			RuleStateConsumptionMode: validation.RuleStateConsumptionMode,
-		})
+		}
+		compiled, err := CompileTurnStateUpdates(validation.ActorState, validation.CurrentState, updates, compileOptions)
 		if err != nil {
-			diagnostics = append(diagnostics, diagnosticForStateUpdateError(err))
-			rejected[TurnSubmissionModuleStateChanges] = true
-		} else if diagnostic := storyContextSubmissionDiagnostic(validation.ActorState, validation.CurrentState, updates); diagnostic != nil {
-			diagnostics = append(diagnostics, *diagnostic)
+			validationErrors := flattenStateUpdateValidationErrors(err)
+			collected := collectTurnStateUpdateValidationErrors(validation.ActorState, validation.CurrentState, updates, compileOptions)
+			validationErrors = mergeStateUpdateValidationErrors(validationErrors, collected)
+			if len(validationErrors) > 0 {
+				err = &StateUpdateValidationErrors{Items: validationErrors}
+			}
+			diagnostics = append(diagnostics, diagnosticsForStateUpdateError(err)...)
 			rejected[TurnSubmissionModuleStateChanges] = true
 		} else {
-			prepared.result.StateUpdates = compiled.Updates
-			prepared.stateUpdatesAccepted = true
+			moduleDiagnostics := make([]TurnSubmissionDiagnostic, 0, 2)
+			if diagnostic := storyContextSubmissionDiagnostic(validation.ActorState, validation.CurrentState, updates); diagnostic != nil {
+				moduleDiagnostics = append(moduleDiagnostics, *diagnostic)
+			}
+			if validation.RequireCompleteInitialState {
+				if diagnostic := openingInitialStateSubmissionDiagnostic(validation.ActorState, validation.CurrentState, compiled); diagnostic != nil {
+					moduleDiagnostics = append(moduleDiagnostics, *diagnostic)
+				}
+			}
+			if len(moduleDiagnostics) > 0 {
+				diagnostics = append(diagnostics, moduleDiagnostics...)
+				rejected[TurnSubmissionModuleStateChanges] = true
+			} else {
+				prepared.result.StateUpdates = compiled.Updates
+				prepared.stateUpdatesAccepted = true
+			}
 		}
 	}
 
@@ -310,44 +330,6 @@ func decodeStrictJSON(data []byte, target any, useNumber bool) error {
 	return nil
 }
 
-func diagnosticForStateUpdateError(err error) TurnSubmissionDiagnostic {
-	var validationError *StateUpdateValidationError
-	if !errors.As(err, &validationError) {
-		return *newTurnSubmissionDiagnostic(TurnSubmissionModuleStateChanges, nil, "state_changes_invalid", "/state_changes", "valid atomic state_changes list", "invalid", trimBytes(err.Error(), maxTurnSubmissionDiagnosticMessage), "The state_changes module is invalid.")
-	}
-	return *newTurnSubmissionDiagnostic(
-		TurnSubmissionModuleStateChanges,
-		intPointer(validationError.Index),
-		validationError.Code,
-		fmt.Sprintf("/state_changes/%d", validationError.Index),
-		validationError.Expected,
-		validationError.Actual,
-		trimBytes(validationError.Error(), maxTurnSubmissionDiagnosticMessage),
-		stateUpdateDiagnosticEnglish(validationError.Code),
-	)
-}
-
-func stateUpdateDiagnosticEnglish(code string) string {
-	switch code {
-	case "invalid_state_path":
-		return "The structured actor_id, field_id, or subpath is invalid."
-	case "invalid_actor_id", "actor_not_found":
-		return "The first path segment must be an existing stable Actor ID, not a display name."
-	case "state_field_not_found":
-		return "The state field does not exist in the Actor's frozen schema."
-	case "delta_target_not_number":
-		return "delta requires an existing numeric target and never treats a missing value as zero."
-	case "duplicate_rule_state_update":
-		return "RuleResolution already consumes this field in the current turn."
-	case "overlapping_state_path":
-		return "State changes in one atomic module must not duplicate or overlap."
-	case "state_value_too_large":
-		return "The state change value exceeds the bounded payload limit."
-	default:
-		return "The state change failed frozen-schema validation."
-	}
-}
-
 func newTurnSubmissionDiagnostic(module string, index *int, code, path, expected, actual, messageZH, messageEN string) *TurnSubmissionDiagnostic {
 	return &TurnSubmissionDiagnostic{
 		Module:    module,
@@ -391,9 +373,6 @@ func jsonValueKind(raw []byte) string {
 func turnSubmissionAllowedFields(template ActorStateTemplate) []string {
 	fields := make([]string, 0, len(template.Fields))
 	for _, field := range template.Fields {
-		if field.Visibility == "hidden" {
-			continue
-		}
 		fields = append(fields, actorStateFieldID(field))
 		if len(fields) >= maxTurnSubmissionAllowedFields {
 			break

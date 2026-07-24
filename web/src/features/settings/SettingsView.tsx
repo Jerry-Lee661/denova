@@ -1,7 +1,6 @@
 import { cloneElement, isValidElement, useEffect, useId, useMemo, useRef, useState, useCallback } from 'react'
-import { toast } from 'sonner'
 import type { ReactNode } from 'react'
-import { ChevronDown, ChevronUp, Download, ExternalLink, Loader2, Plus, RefreshCw, Save, Settings as SettingsIcon, Trash2 } from 'lucide-react'
+import { ChevronDown, ChevronUp, Download, ExternalLink, Loader2, Plus, RefreshCw, Settings as SettingsIcon, Trash2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { ImageAPIProfileSettings, ModelProfileSettings, Settings, UpdateApplyResult, UpdateCheckResult, UpdateInstallProgress, UpdateInstallResult } from './types'
 import { applyUpdate, checkForUpdate, installUpdateStream } from './api'
@@ -10,6 +9,7 @@ import { useLayeredSettingsDraft } from './use-layered-settings-draft'
 import { getInteractiveTellers } from '@/features/interactive/api'
 import type { Teller } from '@/features/interactive/types'
 import { InlineErrorNotice } from '@/components/common/inline-error-notice'
+import { AutosaveStatusIndicator } from '@/components/forms/autosave-status'
 import { SettingsFieldRow } from '@/components/forms/settings-field-row'
 import { AdaptiveSurface } from '@/components/layout/adaptive-surface'
 import { FeaturePageShell } from '@/components/layout/feature-page-shell'
@@ -60,7 +60,7 @@ const TRACE_EXPORTER_OPTIONS = [
 ] as const
 export function SettingsView({ onClose }: { onClose?: () => void }) {
   const { t } = useTranslation()
-  const { layered, draft, setDraft, saving, error, saveNow } = useLayeredSettingsDraft({
+  const { layered, draft, setDraft, error, autosaveStatus, autosaveError, saveNow } = useLayeredSettingsDraft({
     layer: 'user',
     sourcePrefix: 'settings-view',
   })
@@ -166,13 +166,6 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
       setApplyingUpdate(false)
     }
   }, [])
-
-  const onSave = async () => {
-    try {
-      await saveNow()
-      toast.success(t('common.saved'))
-    } catch { /* useLayeredSettingsDraft exposes the localized page error state. */ }
-  }
 
   const setField = <K extends keyof Settings>(k: K, v: Settings[K]) =>
     setDraft((d) => ({ ...d, [k]: v }))
@@ -467,13 +460,8 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
                    onChange={(v) => setField('version_timed_enabled', v)} />
           <Num label={t('settings.versions.timedInterval')} value={draft.version_timed_interval_minutes ?? null}
                placeholder={placeholderFor('version_timed_interval_minutes')}
+               min={1}
                onChange={(v) => setField('version_timed_interval_minutes', v)} />
-          <BoolTri label={t('settings.versions.agentAuto')} value={draft.version_agent_enabled ?? null}
-                   effective={effective.version_agent_enabled}
-                   onChange={(v) => setField('version_agent_enabled', v)} />
-          <Num label={t('settings.versions.agentThreshold')} value={draft.version_agent_char_threshold ?? null}
-               placeholder={placeholderFor('version_agent_char_threshold')}
-               onChange={(v) => setField('version_agent_char_threshold', v)} />
         </>
       ),
     },
@@ -559,19 +547,17 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
       className="nova-settings-view"
       error={error}
       errorTitle={t('settings.error.save')}
-      onClose={onClose}
+      onClose={onClose ? () => {
+        void saveNow().then(() => onClose()).catch(() => undefined)
+      } : undefined}
       closeLabel={t('settings.close')}
+      onSaveShortcut={() => saveNow().catch(() => undefined)}
       actions={(
-        <Button
-          type="button"
-          onClick={onSave}
-          disabled={saving}
-          variant="secondary"
-          size="sm"
-        >
-          {saving ? <Loader2 className="animate-spin" data-icon="inline-start" /> : <Save data-icon="inline-start" />}
-          {t('common.save')}
-        </Button>
+        <AutosaveStatusIndicator
+          status={autosaveStatus}
+          error={autosaveError}
+          onRetry={() => saveNow().catch(() => undefined)}
+        />
       )}
     >
       <AdaptiveSurface

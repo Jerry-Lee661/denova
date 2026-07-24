@@ -1,11 +1,11 @@
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it } from 'vitest'
-import type { Snapshot } from '../../types'
+import type { ActorStateField, Snapshot } from '../../types'
 import { StateView } from './StateView'
 
 describe('StateView', () => {
-  it('renders Actor templates, fields, and visible trait snapshots without raw Actor JSON', () => {
+  it('renders Actor templates, fields, and historical trait snapshots without raw Actor JSON', () => {
     render(
       <StateView
         section="actors"
@@ -41,8 +41,14 @@ describe('StateView', () => {
                 {
                   pool_id: 'secret',
                   trait_id: 'director-secret',
-                  name: '导演隐藏词条',
+                  name: '旧隐藏词条',
                   visibility: 'hidden',
+                },
+                {
+                  pool_id: 'secret',
+                  trait_id: 'old-spoiler',
+                  name: '旧剧透词条',
+                  visibility: 'spoiler',
                 },
               ],
             },
@@ -56,7 +62,8 @@ describe('StateView', () => {
     expect(card.queryByText('主角')).not.toBeInTheDocument()
     expect(card.queryByText(/修行者/)).not.toBeInTheDocument()
     expect(card.getByText('来自失落纪元且尚未完全觉醒的古老血脉')).toHaveAttribute('title', '一条足够长、用于验证窄状态卡截断展示的词条说明。')
-    expect(card.queryByText('导演隐藏词条')).not.toBeInTheDocument()
+    expect(card.getByText('旧隐藏词条')).toBeInTheDocument()
+    expect(card.getByText('旧剧透词条')).toBeInTheDocument()
     expect(card.getByText(/青石镇客栈/)).toBeInTheDocument()
 		expect(card.getByText('身体状态')).toBeInTheDocument()
 		expect(card.getByText('旧玉佩')).toBeInTheDocument()
@@ -119,6 +126,30 @@ describe('StateView', () => {
     expect(screen.queryByText('敌对')).not.toBeInTheDocument()
   })
 
+  it('separates archived Actors into a collapsed read-only region', async () => {
+    render(
+      <StateView
+        section="actors"
+        snapshot={{ story_id: 'story', branch_id: 'main', turns: [], state: {} }}
+        stateFacts={[
+          ['actors', {
+            protagonist: { name: '林风', role: 'protagonist', state: { stance: '迎战' } },
+            wolf: { name: '赤瞳狼王', role: 'opponent', state: { stance: '完整归档状态不应显示' } },
+          }],
+          ['actor_archives', { wolf: { reason: '本回合已确认死亡', source_turn_id: 'turn-death' } }],
+        ]}
+      />,
+    )
+
+    expect(screen.getByRole('article', { name: '林风' })).toBeInTheDocument()
+    expect(screen.queryByRole('article', { name: '赤瞳狼王' })).not.toBeInTheDocument()
+    expect(screen.queryByText('完整归档状态不应显示')).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: '已归档角色（1）' }))
+    expect(screen.getByText('赤瞳狼王')).toBeInTheDocument()
+    expect(screen.getByText('本回合已确认死亡')).toBeInTheDocument()
+    expect(screen.getByText('turn-death')).toBeInTheDocument()
+  })
+
   it('shows inline meters for numeric ranged fields on collapsed actor rows', () => {
     render(
       <StateView
@@ -150,7 +181,7 @@ describe('StateView', () => {
     expect(within(supportingRow).queryByText('状态字段')).not.toBeInTheDocument()
   })
 
-  it('does not fall back to raw state keys when a frozen template has no visible fields', () => {
+  it('renders fields from historical schemas regardless of legacy visibility metadata', () => {
     render(
       <StateView
         section="actors"
@@ -162,15 +193,20 @@ describe('StateView', () => {
           actor_state_schema: {
             version: 2,
             revision: 1,
-            system: { templates: [{ id: 'secret_actor', name: '秘密角色', fields: [{ name: '导演秘密', type: 'string', visibility: 'hidden' }] }] },
+            system: { templates: [{ id: 'secret_actor', name: '秘密角色', fields: [
+              { name: '旧隐藏字段', type: 'string', visibility: 'hidden' },
+              { name: '旧剧透字段', type: 'string', visibility: 'spoiler' },
+            ] as unknown as ActorStateField[] }] },
           },
         }}
-        stateFacts={[['actors', { secret: { name: '无名', role: 'supporting', template_id: 'secret_actor', state: { 导演秘密: '不得泄露' } } }]]}
+        stateFacts={[['actors', { secret: { name: '无名', role: 'supporting', template_id: 'secret_actor', state: { 旧隐藏字段: '仍然展示', 旧剧透字段: '普通字段' } } }]]}
       />,
     )
 
-    expect(screen.queryByText('导演秘密')).not.toBeInTheDocument()
-    expect(screen.queryByText('不得泄露')).not.toBeInTheDocument()
+    expect(screen.getByText('旧隐藏字段')).toBeInTheDocument()
+    expect(screen.getByText('仍然展示')).toBeInTheDocument()
+    expect(screen.getByText('旧剧透字段')).toBeInTheDocument()
+    expect(screen.getByText('普通字段')).toBeInTheDocument()
   })
 
   it('shows an empty hint instead of raw structure when there are no actors', () => {

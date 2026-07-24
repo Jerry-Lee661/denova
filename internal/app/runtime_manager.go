@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -102,9 +101,13 @@ func (s *WorkspaceRuntimeManager) SwitchWorkspace(ctx context.Context, path stri
 	a.stopWorkspaceDirectorTasks()
 
 	a.mu.Lock()
+	previousVersionService := a.versionService
 	a.applyRuntime(runtime)
 	a.cfg.Workspace = runtime.workspace
 	a.mu.Unlock()
+	if previousVersionService != nil && previousVersionService != runtime.versionService {
+		previousVersionService.Close()
+	}
 
 	_ = a.bookRegistry.Touch(runtime.workspace)
 	return runtime.workspace, nil
@@ -231,8 +234,12 @@ func (s *WorkspaceRuntimeManager) activateFallbackWorkspace(ctx context.Context)
 	}
 	a.stopWorkspaceDirectorTasks()
 	a.mu.Lock()
+	previousVersionService := a.versionService
 	a.clearRuntime()
 	a.mu.Unlock()
+	if previousVersionService != nil {
+		previousVersionService.Close()
+	}
 	return "", nil
 }
 
@@ -359,18 +366,9 @@ func (s *WorkspaceRuntimeManager) UpdateUserSettings(settings config.Settings, b
 	}
 	a.mu.RUnlock()
 	path := config.UserConfigPath(novaDir)
-	existing, err := config.ReadSettingsFile(path)
-	if err != nil {
-		return config.LayeredSettings{}, err
-	}
-	prepared, err := config.PrepareUserSettingsForWrite(existing, settings)
-	if err != nil {
-		return config.LayeredSettings{}, err
-	}
-	if err := config.WriteSettingsFileIfRevision(path, prepared, baseRevision); err != nil {
-		if errors.Is(err, config.ErrSettingsUnchanged) {
-			return s.Settings()
-		}
+	if _, err := config.MutateSettingsFile(path, baseRevision, func(existing config.Settings) (config.Settings, error) {
+		return config.PrepareUserSettingsForWrite(existing, settings)
+	}); err != nil {
 		return config.LayeredSettings{}, err
 	}
 	log.Printf("[settings] 用户配置已保存 path=%s", path)
@@ -381,7 +379,12 @@ func (s *WorkspaceRuntimeManager) UpdateUserSettings(settings config.Settings, b
 	a.mu.Lock()
 	applyLayeredSettingsToConfig(a.cfg, layered)
 	syncRuntimeDiagnostics(a.cfg)
+	versionService := a.versionService
+	autoSettings := versionAutoSettingsForConfig(a.cfg)
 	a.mu.Unlock()
+	if versionService != nil {
+		versionService.ConfigureAutoVersion(autoSettings)
+	}
 	return layered, nil
 }
 
@@ -399,15 +402,9 @@ func (s *WorkspaceRuntimeManager) UpdateWorkspaceSettings(settings config.Settin
 		return config.LayeredSettings{}, ErrNoWorkspaceOpen
 	}
 	path := config.WorkspaceConfigPath(workspace)
-	existing, err := config.ReadSettingsFile(path)
-	if err != nil {
-		return config.LayeredSettings{}, err
-	}
-	prepared := config.PrepareWorkspaceAgentSettingsForWrite(existing, settings)
-	if err := config.WriteSettingsFileIfRevision(path, prepared, baseRevision); err != nil {
-		if errors.Is(err, config.ErrSettingsUnchanged) {
-			return s.Settings()
-		}
+	if _, err := config.MutateSettingsFile(path, baseRevision, func(existing config.Settings) (config.Settings, error) {
+		return config.PrepareWorkspaceAgentSettingsForWrite(existing, settings), nil
+	}); err != nil {
 		return config.LayeredSettings{}, err
 	}
 	log.Printf("[settings] 工作区 Agent 定制已保存 path=%s", path)
@@ -536,12 +533,6 @@ func applyLayeredSettingsToConfig(cfg *config.Config, layered config.LayeredSett
 	if effective.VersionTimedIntervalMinutes != nil {
 		cfg.VersionTimedIntervalMinutes = appSettingsInt(effective.VersionTimedIntervalMinutes, 10)
 	}
-	if effective.VersionAgentEnabled != nil {
-		cfg.VersionAgentEnabled = *effective.VersionAgentEnabled
-	}
-	if effective.VersionAgentCharThreshold != nil {
-		cfg.VersionAgentCharThreshold = appSettingsInt(effective.VersionAgentCharThreshold, 3000)
-	}
 }
 
 func applySettingsLayerToConfig(cfg *config.Config, settings config.Settings) {
@@ -647,12 +638,6 @@ func applySettingsLayerToConfig(cfg *config.Config, settings config.Settings) {
 	}
 	if settings.VersionTimedIntervalMinutes != nil {
 		cfg.VersionTimedIntervalMinutes = appSettingsInt(settings.VersionTimedIntervalMinutes, 10)
-	}
-	if settings.VersionAgentEnabled != nil {
-		cfg.VersionAgentEnabled = *settings.VersionAgentEnabled
-	}
-	if settings.VersionAgentCharThreshold != nil {
-		cfg.VersionAgentCharThreshold = appSettingsInt(settings.VersionAgentCharThreshold, 3000)
 	}
 }
 

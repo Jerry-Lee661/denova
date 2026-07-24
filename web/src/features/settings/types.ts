@@ -33,8 +33,6 @@ export interface Settings {
   chapter_group_max?: number | null
   version_timed_enabled?: boolean | null
   version_timed_interval_minutes?: number | null
-  version_agent_enabled?: boolean | null
-  version_agent_char_threshold?: number | null
   ui_font_family?: string
   ui_font_size?: number | null
   reading_font_family?: string
@@ -151,9 +149,6 @@ export interface AgentContextOverride {
   compaction_target_min_ratio?: number | null
   compaction_target_max_ratio?: number | null
   tool_result_retention_enabled?: boolean | null
-  tool_result_keep_recent?: number | null
-  tool_result_context_budget_kb?: number | null
-  tool_result_preview_chars?: number | null
 }
 
 interface AgentGeneralSubAgentSettings {

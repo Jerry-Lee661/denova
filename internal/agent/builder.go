@@ -19,7 +19,6 @@ import (
 	"denova/config"
 	agenttools "denova/internal/agent/tools"
 	"denova/internal/book"
-	"denova/internal/interactive"
 	"denova/internal/prompts"
 	"denova/internal/providercompat"
 	novaskills "denova/internal/skills"
@@ -64,22 +63,14 @@ func BuildInteractiveStory(ctx context.Context, cfg *config.Config, state *book.
 }
 
 func BuildInteractiveDirector(ctx context.Context, cfg *config.Config, state *book.State, toolContexts ...InteractiveStoryToolContext) (adk.Agent, error) {
-	maintenanceTask := ""
-	if len(toolContexts) > 0 {
-		maintenanceTask = toolContexts[0].MaintenanceTask
-	}
-	systemInstruction := prompts.BuildInteractiveDirectorSystemInstruction()
-	if maintenanceTask == "state_schema_initialization" {
-		systemInstruction = prompts.BuildInteractiveStateSchemaAdapterSystemInstruction()
-	}
 	return buildDeepAgent(ctx, cfg, deepAgentSpec{
 		Kind:              config.AgentKindInteractiveDirector,
 		Name:              "DenovaInteractiveDirectorAgent",
 		Description:       "AI 互动故事后台导演",
-		Instruction:       protectedSystemInstruction(cfg, config.AgentKindInteractiveDirector, systemInstruction),
+		Instruction:       protectedSystemInstruction(cfg, config.AgentKindInteractiveDirector, prompts.BuildInteractiveDirectorSystemInstruction()),
 		EnableSkills:      false,
 		DisableWriteTodos: true,
-		ExtraHandlers:     []adk.ChatModelAgentMiddleware{newInteractiveDirectorPlanFileMiddleware(maintenanceTask)},
+		ExtraHandlers:     []adk.ChatModelAgentMiddleware{newInteractiveDirectorPlanFileMiddleware()},
 		ExtraToolsFactory: interactiveDirectorToolsFactory(cfg, toolContexts...),
 	})
 }
@@ -561,6 +552,11 @@ func interactiveStoryToolsFactory(cfg *config.Config, toolContexts ...Interactiv
 				return nil, err
 			}
 			tools = append(tools, historyTools...)
+			stateSchemaTools, err := newInteractiveOpeningStateSchemaTools(toolContexts[0])
+			if err != nil {
+				return nil, err
+			}
+			tools = append(tools, stateSchemaTools...)
 			turnTools, err := newInteractiveTurnTools(toolContexts[0])
 			if err != nil {
 				return nil, err
@@ -581,13 +577,6 @@ func interactiveDirectorToolsFactory(cfg *config.Config, toolContexts ...Interac
 		if cfg != nil && settings.LoreRead {
 			var options []loreToolsOptions
 			switch strings.TrimSpace(storyToolContext.MaintenanceTask) {
-			case "state_schema_initialization":
-				options = append(options, loreToolsOptions{ReadPolicy: &loreReadPolicy{
-					MaxItemsPerCall: interactive.StateSchemaLoreReadMaxItemsPerCall,
-					MaxResultBytes:  interactive.StateSchemaLoreReadMaxResultBytes,
-					MaxTotalBytes:   interactive.StateSchemaLoreReadMaxTotalBytes,
-					OnRead:          storyToolContext.OnLoreItemsRead,
-				}})
 			case "director_plan_update", "opening_plan":
 				policy := defaultLoreReadPolicy()
 				policy.OnRead = storyToolContext.OnLoreItemsRead
@@ -604,9 +593,6 @@ func interactiveDirectorToolsFactory(cfg *config.Config, toolContexts ...Interac
 		}
 		ctx := storyToolContext
 		switch strings.TrimSpace(ctx.MaintenanceTask) {
-		case "state_schema_initialization":
-			stateSchemaTools, err := newInteractiveStateSchemaTools(ctx)
-			return append(tools, stateSchemaTools...), err
 		case "director_plan_update", "opening_plan":
 			historyTools, err := newInteractiveHistoryTools(ctx)
 			if err != nil {

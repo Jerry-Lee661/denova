@@ -66,7 +66,7 @@ describe('ActorStateExplorer', () => {
           templates: [{
             id: 'protagonist',
             name: '主角状态',
-            fields: [{ id: 'health', name: '身体状态', path: 'current.health', type: 'string', visibility: 'visible' }],
+            fields: [{ id: 'health', name: '身体状态', path: 'current.health', type: 'string', group: '状态' }],
           }],
           initial_actors: [],
           trait_pools: [],
@@ -91,8 +91,11 @@ describe('ActorStateExplorer', () => {
     expect(templateItem).toHaveAttribute('tabindex', '0')
     expect(templateItem.querySelector(':scope > div')?.className).not.toContain('inset_3px_0_0')
     expect(container.querySelector('.state-tree-branch')).toBeInTheDocument()
+    const fieldGroup = screen.getByRole('treeitem', { name: '状态' })
+    expect(fieldGroup).toHaveAttribute('aria-expanded', 'true')
+    expect(fieldGroup).toHaveAttribute('aria-level', '3')
     const fieldItem = screen.getByRole('treeitem', { name: '身体状态' })
-    expect(fieldItem).toHaveAttribute('aria-level', '3')
+    expect(fieldItem).toHaveAttribute('aria-level', '4')
 
     templateItem.focus()
     await user.keyboard('{ArrowDown}')
@@ -115,8 +118,8 @@ describe('ActorStateExplorer', () => {
             id: 'protagonist',
             name: 'Protagonist',
             fields: [
-              { id: 'health', name: 'Health', type: 'number', visibility: 'visible' },
-              { id: 'mana', name: 'Mana', type: 'number', visibility: 'visible' },
+              { id: 'health', name: 'Health', type: 'number' },
+              { id: 'mana', name: 'Mana', type: 'number' },
             ],
           }],
           initial_actors: [],
@@ -146,7 +149,7 @@ describe('ActorStateExplorer', () => {
           templates: [{
             id: 'protagonist',
             name: '主角状态',
-            fields: [{ id: 'health', name: '身体状态', path: 'current.health', type: 'string', visibility: 'visible' }],
+            fields: [{ id: 'health', name: '身体状态', path: 'current.health', type: 'string' }],
           }],
           initial_actors: [],
           trait_pools: [],
@@ -226,6 +229,137 @@ describe('ActorStateExplorer', () => {
     expect(screen.getByRole('treeitem', { name: 'Actor B' })).toHaveAttribute('aria-selected', 'true')
   })
 
+  it('edits field display group and display hint from the field detail pane', async () => {
+    const user = userEvent.setup()
+    const onChange = vi.fn()
+    render(
+      <StatefulExplorer
+        initialValue={{
+          templates: [{
+            id: 'protagonist',
+            name: '主角状态',
+            fields: [{ name: '当前处境', type: 'string' }],
+          }],
+          initial_actors: [],
+          trait_pools: [],
+        }}
+        onChange={onChange}
+      />,
+    )
+
+    const fieldItem = screen.getByRole('treeitem', { name: '当前处境' })
+    await user.click(within(fieldItem).getByTitle(/^当前处境/))
+
+    const groupInput = await screen.findByPlaceholderText(/留空自动分组|auto grouping/i)
+    await user.type(groupInput, '战斗')
+    expect(onChange.mock.lastCall?.[0]).toMatchObject({
+      templates: [{ fields: [{ name: '当前处境', group: '战斗' }] }],
+    })
+
+    const displayLabel = screen.getByText(/^展示方式$|^Display$/)
+    const displaySelect = displayLabel.parentElement?.querySelector('button[role="combobox"]')
+    expect(displaySelect).not.toBeNull()
+    await user.click(displaySelect as HTMLElement)
+    await user.click(await screen.findByRole('option', { name: /段落块|Paragraph block/ }))
+    expect(onChange.mock.lastCall?.[0]).toMatchObject({
+      templates: [{ fields: [{ name: '当前处境', display: 'block' }] }],
+    })
+  })
+
+  it('does not expose legacy field or trait visibility metadata in the tree and detail editors', async () => {
+    const user = userEvent.setup()
+    const legacyValue = {
+      templates: [{
+        id: 'protagonist',
+        name: '主角状态',
+        fields: [{ name: '当前处境', type: 'string', visibility: 'hidden' }],
+      }],
+      initial_actors: [],
+      trait_pools: [{
+        id: 'origin',
+        name: '出身',
+        traits: [{ id: 'wanderer', name: '游侠', weight: 1, visibility: 'spoiler' }],
+      }],
+    } as unknown as ExplorerProps['value']
+
+    render(
+      <ActorStateExplorer
+        value={legacyValue}
+        onChange={vi.fn()}
+        onValidityChange={vi.fn()}
+      />,
+    )
+
+    const fieldItem = screen.getByRole('treeitem', { name: '当前处境' })
+    expect(within(fieldItem).queryByText(/^隐藏$|^Hidden$/)).not.toBeInTheDocument()
+    await user.click(within(fieldItem).getByTitle(/^当前处境/))
+    expect(screen.queryByText(/^可见性$|^Visibility$/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/^隐藏$|^Hidden$/)).not.toBeInTheDocument()
+
+    const traitItem = screen.getByRole('treeitem', { name: '游侠' })
+    expect(within(traitItem).queryByText(/^剧透$|^Spoiler$/)).not.toBeInTheDocument()
+    await user.click(within(traitItem).getByTitle(/^游侠/))
+    expect(screen.queryByText(/^可见性$|^Visibility$/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/^剧透$|^Spoiler$/)).not.toBeInTheDocument()
+  })
+
+  it('keeps section and renderer hints in the schema without exposing UI ordering controls', async () => {
+    render(
+      <StatefulExplorer
+        initialValue={{
+          templates: [{
+            id: 'protagonist',
+            name: '主角状态',
+            fields: [
+              { name: '称号', type: 'string', group: '身份' },
+              { name: '声望', type: 'string', group: '人际' },
+            ],
+          }],
+          initial_actors: [],
+          trait_pools: [],
+        }}
+        onChange={() => undefined}
+      />,
+    )
+
+    expect(screen.queryByRole('button', { name: /下移分组|Move group down/ })).not.toBeInTheDocument()
+    expect(screen.queryByText(/^排序$|^Order$/)).not.toBeInTheDocument()
+  })
+
+  it('opens nested object defaults as JSON so panel values stay readable and editable', async () => {
+    const user = userEvent.setup()
+    const panelDefault = {
+      力量: { 基础值: 10, 当前值: 12, 修正说明: '装备 +2' },
+    }
+    render(
+      <ActorStateExplorer
+        value={{
+          templates: [{
+            id: 'protagonist',
+            name: '主角状态',
+            fields: [{ name: '面板', type: 'object', default: panelDefault }],
+          }],
+          initial_actors: [],
+          trait_pools: [],
+        }}
+        onChange={vi.fn()}
+        onValidityChange={vi.fn()}
+      />,
+    )
+
+    const panelItem = screen.getByRole('treeitem', { name: '面板' })
+    await user.click(within(panelItem).getByTitle(/^面板/))
+
+    const expectedJSON = JSON.stringify(panelDefault, null, 2)
+    const jsonEditor = screen.getAllByRole('textbox').find((element) => (
+      element.tagName === 'TEXTAREA' && (element as HTMLTextAreaElement).value === expectedJSON
+    ))
+    expect(jsonEditor).toBeInTheDocument()
+    expect(screen.queryByDisplayValue('[object Object]')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /JSON/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /结构化|Structured/ })).toBeDisabled()
+  })
+
   it('keeps a trait pool and trait selected while IDs change and cascades template rules', async () => {
     const user = userEvent.setup()
     const onChange = vi.fn()
@@ -236,7 +370,7 @@ describe('ActorStateExplorer', () => {
           initial_actors: [],
           trait_pools: [
             { id: 'pool-a', name: 'Pool A', traits: [] },
-            { id: 'pool-b', name: 'Pool B', traits: [{ id: 'trait-b', name: 'Trait B', weight: 1, visibility: 'visible' }] },
+            { id: 'pool-b', name: 'Pool B', traits: [{ id: 'trait-b', name: 'Trait B', weight: 1 }] },
           ],
         }}
         onChange={onChange}
@@ -254,7 +388,7 @@ describe('ActorStateExplorer', () => {
     })
 
     const traitItem = screen.getByRole('treeitem', { name: 'Trait B' })
-    expect(within(traitItem).getByText(/可见|Visible/)).toBeInTheDocument()
+    expect(within(traitItem).queryByText(/可见|Visible/)).not.toBeInTheDocument()
     await user.click(within(traitItem).getByTitle(/^Trait B/))
     fireEvent.change(await screen.findByDisplayValue('trait-b'), { target: { value: 'trait-renamed' } })
     expect(screen.getByDisplayValue('trait-renamed')).toBeInTheDocument()

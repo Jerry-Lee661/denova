@@ -28,7 +28,10 @@ func TestAppendTurnWithStatePersistsTurnResultAndActorStateAtomically(t *testing
 				Value: map[string]any{
 					"template_id": "protagonist",
 					"name":        "林风",
-					"state":       map[string]any{"当前身体状态": "掌心灼伤缓解，体力恢复"},
+					"state": map[string]any{
+						"生命":   "10/10",
+						"持续效果": []any{"掌心灼伤｜轻微影响抓握｜休息后解除"},
+					},
 				},
 			}},
 			Choices: testTurnChoices(),
@@ -47,17 +50,17 @@ func TestAppendTurnWithStatePersistsTurnResultAndActorStateAtomically(t *testing
 	if delta == nil || turn.StateDelta == nil || len(turn.StateDelta.ActorOps) == 0 {
 		t.Fatalf("expected atomic state delta: turn=%#v delta=%#v", turn.StateDelta, delta)
 	}
-	foundBodyStatus := false
+	foundEffectState := false
 	for _, op := range turn.StateDelta.ActorOps {
 		if op.SourceKind != StateOpSourceTurnResult || op.SourceID != turn.ID || op.SourceTurnID != turn.ID {
 			t.Fatalf("turn result state op source mismatch: %#v", op)
 		}
-		if op.ActorID == "protagonist" && op.FieldID == "当前身体状态" {
-			foundBodyStatus = true
+		if op.ActorID == "protagonist" && op.FieldID == "持续效果" {
+			foundEffectState = true
 		}
 	}
-	if !foundBodyStatus {
-		t.Fatalf("body status op missing: %#v", turn.StateDelta.ActorOps)
+	if !foundEffectState {
+		t.Fatalf("effect state op missing: %#v", turn.StateDelta.ActorOps)
 	}
 	if turn.StateStatus != "ready" {
 		t.Fatalf("turn state status mismatch: %q", turn.StateStatus)
@@ -70,8 +73,66 @@ func TestAppendTurnWithStatePersistsTurnResultAndActorStateAtomically(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := actorStateFieldValue(snapshot.State, "protagonist", "当前身体状态"); got != "掌心灼伤缓解，体力恢复" {
-		t.Fatalf("body status = %#v", got)
+	effects, ok := actorStateFieldValue(snapshot.State, "protagonist", "持续效果").([]any)
+	if !ok {
+		t.Fatalf("dynamic effects = %#v", actorStateFieldValue(snapshot.State, "protagonist", "持续效果"))
+	}
+	if len(effects) != 1 || effects[0] != "掌心灼伤｜轻微影响抓握｜休息后解除" {
+		t.Fatalf("dynamic effects = %#v", effects)
+	}
+}
+
+func TestAppendTurnWithStateReplaysActorArchiveAndRestore(t *testing.T) {
+	system := StoryDirectorActorStateSystem{
+		Templates:     []ActorStateTemplate{{ID: "opponent", Fields: []ActorStateField{{Name: "生命值", Type: "number"}}}},
+		InitialActors: []ActorStateInitialActor{{ID: "狼王", Name: "狼王", TemplateID: "opponent", State: map[string]any{"生命值": 8}}},
+	}
+	store := NewStore(t.TempDir())
+	story, err := store.CreateStory(CreateStoryRequest{Title: "归档回放", StoryTellerID: "classic", ActorState: &system})
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivedTurn, _, err := store.AppendTurnWithState(story.ID, AppendTurnWithStateRequest{
+		BranchID: "main", User: "结束战斗", Narrative: "狼王倒下。",
+		TurnResult: &TurnResult{StateUpdates: []StateUpdate{{Op: TurnStateUpdateArchive, Path: "/狼王", Value: map[string]any{"reason": "确认死亡"}}}, Choices: testTurnChoices()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if archivedTurn.StateDelta == nil || len(archivedTurn.StateDelta.Ops) == 0 {
+		t.Fatalf("archive must persist inside the turn StateDelta: %#v", archivedTurn)
+	}
+	snapshot, err := store.Snapshot(story.ID, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if getPath(snapshot.State, actorStateRoot+".狼王") == nil {
+		t.Fatal("replay must retain the archived Actor record")
+	}
+	archive, ok := actorArchiveRecordFromState(snapshot.State, "狼王")
+	if !ok || archive.Reason != "确认死亡" || archive.SourceTurnID != archivedTurn.ID {
+		t.Fatalf("archive marker did not replay with turn provenance: %#v", snapshot.State[actorArchiveRoot])
+	}
+
+	restoredTurn, _, err := store.AppendTurnWithState(story.ID, AppendTurnWithStateRequest{
+		BranchID: "main", User: "检查呼吸", Narrative: "狼王尚有微弱呼吸。",
+		TurnResult: &TurnResult{StateUpdates: []StateUpdate{{Op: TurnStateUpdateRestore, Path: "/狼王", Value: map[string]any{"reason": "确认仍然存活"}}}, Choices: testTurnChoices()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restoredTurn.StateDelta == nil || restoredTurn.StateDelta.Ops[0].Op != "unset" {
+		t.Fatalf("restore must persist as a replayable unset operation: %#v", restoredTurn.StateDelta)
+	}
+	snapshot, err = store.Snapshot(story.ID, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, archived := actorArchiveRecordFromState(snapshot.State, "狼王"); archived {
+		t.Fatalf("restore marker removal did not replay: %#v", snapshot.State[actorArchiveRoot])
+	}
+	if got := actorStateFieldValue(snapshot.State, "狼王", "生命值"); got != float64(8) {
+		t.Fatalf("restore must preserve archived Actor state, got %#v", got)
 	}
 }
 

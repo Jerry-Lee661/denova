@@ -55,22 +55,19 @@ describe('MessageItem', () => {
     expect(status.querySelector('.bg-clip-text')).toBeInTheDocument()
   })
 
-  it('流式 assistant 新增正文先预留目标高度，提升为 content 后才显示新文字', () => {
+  it('流式 assistant 只渲染最新目标正文的一棵 Markdown 树', () => {
     const { container, rerender } = render(<MessageItem message={{ role: 'assistant', content: '第一行内容', streaming: true }} />)
 
-    expect(container.querySelector('.nova-streaming-markdown-stage')).toBeNull()
+    expect(container.querySelector('.nova-streaming-content-stage')).toBeNull()
 
     rerender(<MessageItem message={{ role: 'assistant', content: '第一行内容', streaming_target_content: '第一行内容\n第二行内容', streaming: true }} />)
 
-    const stage = container.querySelector('.nova-streaming-markdown-stage')
-    expect(stage).toBeInTheDocument()
-    expect(stage?.querySelector('.nova-streaming-markdown-reserve')).toHaveTextContent('第二行内容')
-    expect(stage?.querySelector('.nova-streaming-markdown-overlay')).toHaveTextContent('第一行内容')
-    expect(stage?.querySelector('.nova-streaming-markdown-overlay')).not.toHaveTextContent('第二行内容')
+    expect(container.querySelector('.nova-streaming-content-stage')).toBeNull()
+    expect(container.querySelector('.chat-agent-message')).toHaveTextContent('第二行内容')
 
     rerender(<MessageItem message={{ role: 'assistant', content: '第一行内容\n第二行内容', streaming: true }} />)
 
-    expect(container.querySelector('.nova-streaming-markdown-stage')).toBeNull()
+    expect(container.querySelector('.nova-streaming-content-stage')).toBeNull()
     expect(container.querySelector('.chat-agent-message')).toHaveTextContent('第二行内容')
   })
 
@@ -290,6 +287,15 @@ describe('MessageItem', () => {
 
     await user.click(screen.getByRole('button', { name: /思考过程/ }))
     expect(screen.getByText('已经分析完')).toBeInTheDocument()
+  })
+
+  it('直接增长的流式 thinking 立即复用单棵文本树显示最新内容', () => {
+    const { container, rerender } = render(<MessageItem message={{ role: 'thinking', content: '正在分析', streaming: true }} />)
+
+    rerender(<MessageItem message={{ role: 'thinking', content: '正在分析下一条线索', streaming: true }} />)
+
+    expect(container.querySelector('.nova-streaming-content-stage')).toBeNull()
+    expect(screen.getByText('正在分析下一条线索')).toBeInTheDocument()
   })
 
   it('工具调用卡片展示工具名、摘要和成功结果', () => {
@@ -571,8 +577,10 @@ describe('MessageItem', () => {
   })
 
   it('工具调用流式预览默认锁定到底部', async () => {
-    const initialArgs = JSON.stringify({ path: 'chapters/ch01.md', content: '开头。'.repeat(80) })
-    const nextArgs = JSON.stringify({ path: 'chapters/ch01.md', content: '开头。'.repeat(120) })
+    const initialContent = `完整起点。${'开头。'.repeat(250)}完整终点。`
+    const nextContent = `${initialContent}${'继续。'.repeat(160)}新的完整终点。`
+    const initialArgs = JSON.stringify({ path: 'chapters/ch01.md', content: initialContent })
+    const nextArgs = JSON.stringify({ path: 'chapters/ch01.md', content: nextContent })
     const { container, rerender } = render(
       <MessageItem
         message={{
@@ -587,6 +595,7 @@ describe('MessageItem', () => {
     )
     const preview = container.querySelector('[data-nova-scroll-lock="tool-stream-preview"]') as HTMLDivElement
     expect(preview).toBeInTheDocument()
+    expect(preview.textContent).toBe(initialContent)
     const scrollMetrics = mockScrollMetrics(preview)
     preview.scrollTop = scrollMetrics.maxScrollTop()
     fireEvent.scroll(preview)
@@ -607,6 +616,7 @@ describe('MessageItem', () => {
     )
 
     await waitFor(() => expect(preview.scrollTop).toBe(scrollMetrics.maxScrollTop()))
+    expect(preview.textContent).toBe(nextContent)
   })
 
   it('write_todos 工具卡片渲染为待办列表，并显示进度', () => {

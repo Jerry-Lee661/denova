@@ -11,7 +11,7 @@ import type { AgentUIMessage } from '@/lib/agent-ui'
 import { agentSubAgentSessionKey, agentViewContent, buildAgentMessageViews, selectAgentTokenUsageRecords, type AgentMessageView, type AgentPartRef } from '@/lib/agent-message-view'
 import { useSkillCommands } from '@/hooks/useSkillCommands'
 import { DEFAULT_WRITING_SKILL, useWritingSkillOptions } from '@/hooks/useWritingSkillOptions'
-import { usePersistedUserSettings } from '@/hooks/usePersistedUserSettings'
+import type { PersistedUserSettingsController } from '@/hooks/usePersistedUserSettings'
 import { AgentChatPane } from './AgentChatPane'
 import { SessionManagementPanel } from './SessionManagementPanel'
 import { AgentTracePanel } from './AgentTracePanel'
@@ -22,21 +22,25 @@ import { WritingComposerSettingsMenu } from './WritingComposerSettingsMenu'
 import { formatPlanDiscussionMessage } from '@/lib/plan-mode'
 import { useWorkspaceChangeGroups } from '@/features/changes/use-change-review'
 import { AgentChangeSummaryCard } from '@/features/changes/agent/AgentChangeSummaryCard'
-import { MAX_REVIEW_FEEDBACK_COMMENT_COUNT, MAX_REVIEW_FEEDBACK_CONTEXT_BYTES, reviewFeedbackCommentCount, reviewFeedbackContextBytes, type ReviewFeedbackBatch, type ReviewFeedbackSelection } from '@/features/changes/agent/ReviewFeedbackTray'
+import { MAX_REVIEW_FEEDBACK_COMMENT_COUNT, MAX_REVIEW_FEEDBACK_CONTEXT_BYTES, reviewFeedbackCommentCount, reviewFeedbackContextBytes, type ReviewFeedbackBatch, type ReviewFeedbackComment, type ReviewFeedbackSelection } from '@/features/changes/agent/ReviewFeedbackTray'
 import { toast } from 'sonner'
 import type { ChatSendOptions } from '@/hooks/useAgentChat'
 
 type AgentPanelView = 'chat' | 'sessions' | 'traces'
 
 const WRITING_AGENT_INIT_EVENT = 'nova:writing-agent-init'
-const WRITING_COMPOSER_SETTING_DEFAULTS = {
+export const WRITING_COMPOSER_SETTING_DEFAULTS = {
   ide_story_teller_id: 'classic',
   ide_image_preset_id: 'game-cg',
   writing_skill_default: DEFAULT_WRITING_SKILL,
 } as const
 
+export type WritingComposerSettingsController = PersistedUserSettingsController<typeof WRITING_COMPOSER_SETTING_DEFAULTS>
+
 interface AgentPanelProps {
   workspace: string
+  /** Owned above the conditional panel so closing the panel cannot discard delayed saves. */
+  composerSettings: WritingComposerSettingsController
   currentChapter?: ChapterSummary
   selectedFile: string | null
   tellers: Teller[]
@@ -54,11 +58,14 @@ interface AgentPanelProps {
   textSelections: TextSelection[]
   ideContext?: IDEContext
   planMode: boolean
+  hasEarlierMessages: boolean
+  isLoadingEarlierHistory: boolean
   fileSuggestions: string[]
   onCreateSession: (title?: string) => void | Promise<void>
   onSwitchSession: (id: string) => void | Promise<void>
   onRenameSession: (id: string, title: string) => void | Promise<void>
   onDeleteSession: (id: string) => void | Promise<void>
+  onLoadEarlierHistory: () => void | Promise<void>
   onSend: (message: string, options?: ChatSendOptions) => boolean | Promise<boolean>
   onAnalyzeContext: (message: string, options?: { writingSkill?: string; ideContext?: IDEContext; imagePresetId?: string; tellerId?: string }) => Promise<ContextAnalysis>
   onStop: () => void
@@ -75,6 +82,7 @@ interface AgentPanelProps {
   onApproveProposedPlan: (ref: AgentPartRef) => void
   onExitPlanMode: () => void
   reviewFeedback?: ReviewFeedbackBatch | null
+  onReviewFeedbackOpen?: (selection: ReviewFeedbackSelection, comment: ReviewFeedbackComment) => void
   onReviewFeedbackRemove?: (selection: ReviewFeedbackSelection, commentID: string) => void
   onReviewFeedbackSubmitted?: (feedback: ReviewFeedbackBatch) => void
   onReviewFeedbackSubmissionFailed?: (feedback: ReviewFeedbackBatch) => void
@@ -87,6 +95,7 @@ interface AgentPanelProps {
 /** IDE 右侧创作 Agent 面板，内部支持在对话与完整会话管理之间切换。 */
 export function AgentPanel({
   workspace,
+  composerSettings: persistedSettings,
   currentChapter,
   selectedFile,
   tellers,
@@ -104,11 +113,14 @@ export function AgentPanel({
   textSelections,
   ideContext,
   planMode,
+  hasEarlierMessages,
+  isLoadingEarlierHistory,
   fileSuggestions,
   onCreateSession,
   onSwitchSession,
   onRenameSession,
   onDeleteSession,
+  onLoadEarlierHistory,
   onSend,
   onAnalyzeContext,
   onStop,
@@ -125,6 +137,7 @@ export function AgentPanel({
   onApproveProposedPlan,
   onExitPlanMode,
   reviewFeedback,
+  onReviewFeedbackOpen,
   onReviewFeedbackRemove,
   onReviewFeedbackSubmitted,
   onReviewFeedbackSubmissionFailed,
@@ -144,7 +157,6 @@ export function AgentPanel({
   const [selectedTraceRunId, setSelectedTraceRunId] = useState('')
   const [inputAreaHeight, setInputAreaHeight] = useState(0)
   const [chatPaneHost] = useState(() => createStablePortalHost('relative flex h-full min-h-0 w-full min-w-0 flex-col'))
-  const persistedSettings = usePersistedUserSettings({ workspace, defaults: WRITING_COMPOSER_SETTING_DEFAULTS })
   const ideTellerId = persistedSettings.values.ide_story_teller_id
   const imagePresetId = persistedSettings.values.ide_image_preset_id
   const writingSkill = persistedSettings.values.writing_skill_default
@@ -241,7 +253,7 @@ export function AgentPanel({
   const timelineAttachments = useMemo(() => (
     (changeGroupsQuery.data ?? [])
       .filter((summary) => Boolean(summary.run_id) && summary.run_id !== activeRunID)
-      .map((summary) => ({
+      .map((summary, index) => ({
         id: summary.id,
         runId: summary.run_id || '',
         content: (
@@ -249,6 +261,7 @@ export function AgentPanel({
             workspace={workspace}
             summary={summary}
             disabled={isStreaming}
+            eagerPreload={!isStreaming && index === 0}
             onReview={(reviewThreadID, groupID) => onOpenChangeReview?.(reviewThreadID, groupID)}
             onWorkspaceChanged={onWorkspaceChanged}
           />
@@ -314,6 +327,10 @@ export function AgentPanel({
     bottomPaddingClassName: 'pb-36',
     bottomPaddingPx: messageListBottomPadding,
     collapseTraceGroups: true,
+    activeTraceDisplay: 'expanded' as const,
+    hasEarlierMessages,
+    isLoadingEarlierMessages: isLoadingEarlierHistory,
+    onLoadEarlierMessages: onLoadEarlierHistory,
     timelineAttachments,
     onOpenSubAgentSession: openSubAgentSession,
     onInsertIllustration,
@@ -348,6 +365,7 @@ export function AgentPanel({
     textSelections,
     onTextSelectionRemove,
     reviewFeedback,
+    onReviewFeedbackOpen,
     onReviewFeedbackRemove,
     skills: skillCommands,
     onContextAnalyze: openContextAnalysis,
@@ -541,11 +559,11 @@ function AgentQuickActions({
   const { t } = useTranslation()
   const target = chapter ? t('chat.quick.targetChapter', { title: chapter.display_title }) : (selectedFile ? t('chat.quick.targetFile', { file: selectedFile }) : t('chat.quick.targetWork'))
   const actions = useMemo(() => [
-    { label: t('chat.quick.nextGroup'), icon: FileText, prompt: '请基于当前大纲、已定稿章节、progress.md、character-states.md 和资料库长期设定，生成接下来一个短期情节单元的章节组细纲。只规划下一组，不要批量生成很多组；细纲要短而可维护，方便阅读、评论和后续更新，每章只写关键点，不写长篇背景解释；如实际定稿已经偏离大纲，请先指出偏差并让我确认是调整大纲还是拉回主线。' },
-    { label: t('chat.quick.writeNextChapter'), icon: PenLine, prompt: '请读取当前章节组细纲、长期大纲、progress.md、character-states.md、资料库长期设定和前面至少两章成章正文，按细纲安排创作下一章。写作前请先按长期大纲的卷章安排和已有章节路径判断下一章所属分卷；若属于某一卷，请写入 chapters/<分卷名>/ 下符合章节文件名模板的文件。新写入的非空章节先作为初稿，由我在章节列表确认后再标记为成章。' },
+    { label: t('chat.quick.nextGroup'), icon: FileText, prompt: '请基于当前大纲、已有章节正文、setting/progress.md、setting/character-states.md 和资料库长期设定，生成接下来一个短期情节单元的章节组细纲。只规划下一组，不要批量生成很多组；细纲要短而可维护，方便阅读、评论和后续更新，每章只写关键点，不写长篇背景解释；如实际正文已经偏离大纲，请先指出偏差并让我确认是调整大纲还是拉回主线。' },
+    { label: t('chat.quick.writeNextChapter'), icon: PenLine, prompt: '请读取当前章节组细纲、长期大纲、setting/progress.md、setting/character-states.md、资料库长期设定和最近至少两章实际正文，按细纲安排创作下一章。写作前以已有章节路径和非空正文判断下一章编号、标题与所属分卷，setting/progress.md 只作为摘要参考；若属于某一卷，请写入 chapters/<分卷名>/ 下符合章节文件名模板的文件。完成正文自检和本轮最后修订后，在同一轮同步更新 setting/progress.md 与 setting/character-states.md；章节是否标记成章不影响同步。' },
     { label: t('chat.quick.continueParagraph'), icon: PenLine, prompt: `请基于${target}的上下文，续写下一段正文，保持原有叙事节奏和人物状态。` },
     { label: t('chat.quick.polishChapter'), icon: WandSparkles, prompt: `请检查并润色${target}，重点优化语句节奏、动作描写和情绪推进，不改变核心剧情。` },
-    { label: t('chat.quick.finalizeState'), icon: FileText, prompt: `请将${target}视为章节定稿，检查其与前后文和当前章节组细纲的连续性，然后同步更新 progress.md 和 character-states.md；只有角色身份、人设、长期关系、能力体系或世界规则等稳定设定发生明确变化时，才更新资料库。除非我明确要求，不要修改长期大纲。` },
+    { label: t('chat.quick.finalizeState'), icon: FileText, prompt: `请检查${target}与前后文和当前章节组细纲的连续性，并根据当前实际正文重新同步 setting/progress.md 和 setting/character-states.md；只有角色身份、人设、长期关系、能力体系或世界规则等稳定设定发生明确变化时，才更新资料库。章节状态只作为 UI 编辑标记，除非我明确要求，否则不要修改长期大纲。` },
     { label: t('chat.quick.consistencyCheck'), icon: SearchCheck, prompt: `请对${target}做一致性检查，重点关注人物动机、时间线、道具、地点和前后文冲突。` },
   ], [target, t])
 
