@@ -10,6 +10,7 @@ log/
 .npm-cache/
 denova-windows-test/
 denova-test.exe
+denova.exe
 nova-windows-test/
 nova-test.exe
 data/
