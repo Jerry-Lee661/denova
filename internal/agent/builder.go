@@ -180,11 +180,26 @@ func buildDeepAgent(ctx context.Context, cfg *config.Config, spec deepAgentSpec)
 		}
 	}
 
+	instruction := spec.Instruction
+	// 复合模型：interactive_story 配置了 writer_profile_id 时，自动挂载一个
+	// tool-less 的叙事写手子 Agent，并把纯叙事文本生成委派给它。写手模型强制
+	// disable_tools，请求 body 不含 tools，避免本地模型的 PEG tool-call grammar
+	// 与自由文本（如 markdown 代码块）输出冲突。主模型仍负责协议工具与状态管理。
+	if spec.Kind == config.AgentKindInteractiveStory && resolved.WriterProfileID != "" && !disableTools {
+		writerAgent, writerErr := buildWriterSubAgent(ctx, cfg, resolved.WriterProfileID)
+		if writerErr != nil {
+			return nil, writerErr
+		}
+		subAgents = append(subAgents, writerAgent)
+		instruction = instruction + buildWriterDelegationInstruction()
+		log.Printf("[agent] interactive_story writer sub-agent enabled writer_profile=%s", resolved.WriterProfileID)
+	}
+
 	return newDeepAgent(ctx, &deep.Config{
 		Name:                   spec.Name,
 		Description:            spec.Description,
 		ChatModel:              chatModel,
-		Instruction:            spec.Instruction,
+		Instruction:            instruction,
 		SubAgents:              subAgents,
 		WithoutWriteTodos:      disableTools || spec.DisableWriteTodos || !toolSettings.Todo,
 		WithoutGeneralSubAgent: disableTools || !config.GeneralSubAgentEnabled(cfg, spec.Kind),
@@ -193,6 +208,25 @@ func buildDeepAgent(ctx context.Context, cfg *config.Config, spec deepAgentSpec)
 		ToolsConfig:            toolsConfig,
 		ModelRetryConfig:       modelRetryConfig(cfg, spec.ModelOutputGuard),
 	})
+}
+
+// writerSubAgentID 是叙事写手子 Agent 的稳定 ID，主模型通过 transfer 委派给它。
+const writerSubAgentID = "narrative-writer"
+
+// buildWriterDelegationInstruction 构建追加到主 Agent instruction 的委派指引，
+// 指引其将纯叙事文本生成委派给写手子 Agent，而协议工具调用、状态管理仍由主模型完成。
+func buildWriterDelegationInstruction() string {
+	return fmt.Sprintf(`
+
+## 叙事写手委派（复合模型）
+
+你配置了一个名为 %q 的叙事写手子 Agent，它使用独立的本地模型，专门负责纯叙事文本生成。
+
+- 当需要生成**叙事正文、场景描写、人物对话、心理活动**等纯文学文本时，请通过 transfer 把该写作任务委派给 %q 子 Agent，由它产出文本后你再包装提交。
+- **协议工具调用**（如 submit_interactive_turn）、**资料库读写**、**状态更新**、**上下文压缩**等仍由你（主模型）亲自处理，不要委派给写手。
+- 委派时，把必要的上下文（当前场景、角色状态、文风要求、字数目标、前文衔接要点）一并传给写手，使其无需访问工具即可独立写作。
+- 写手返回的文本是初稿素材，最终是否符合协议格式、是否需要调整，由你判断并负责提交。
+`, writerSubAgentID, writerSubAgentID)
 }
 
 type chatModelAgentAssemblySpec struct {
@@ -428,7 +462,45 @@ func buildConfiguredSubAgent(ctx context.Context, cfg *config.Config, parent dee
 		ModelRetryConfig: modelRetryConfig(cfg, nil),
 	})
 }
+// buildWriterSubAgent 构建叙事写手子 Agent。它使用 writerProfileID 指定的模型，
+// 强制 disable_tools（请求 body 不含 tools），无 skills、无 sub-agents、无工具，
+// 只负责产出纯叙事文本，避免本地模型的 PEG tool-call grammar 与自由文本冲突。
+func buildWriterSubAgent(ctx context.Context, cfg *config.Config, writerProfileID string) (adk.Agent, error) {
+	writerResolved := config.ResolveProfileModel(cfg, writerProfileID)
+	// 写手永远不注入 tools，无论 profile 是否显式配置 disable_tools。
+	writerResolved.DisableTools = true
+	modelCfg := chatModelConfigFromResolved(writerResolved)
+	cm, err := openai.NewChatModel(ctx, &modelCfg)
+	if err != nil {
+		return nil, fmt.Errorf("创建叙事写手模型失败 profile=%s: %w", writerProfileID, err)
+	}
+	writerModel := providercompat.Wrap(cm, modelCfg)
+	log.Printf("[agent] disable_tools=true for writer sub-agent=%s model=%s, skipping tool assembly", writerSubAgentID, modelCfg.Model)
 
+	return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:        writerSubAgentID,
+		Description: "叙事写手：使用本地模型生成纯叙事文本，不访问任何工具。",
+		Instruction: writerSubAgentInstruction,
+		Model:       writerModel,
+		// 写手是单轮纯文本生成，不需要工具迭代循环。
+		MaxIterations:    1,
+		ToolsConfig:      adk.ToolsConfig{},
+		ModelRetryConfig: modelRetryConfig(cfg, nil),
+	})
+}
+
+// writerSubAgentInstruction 是叙事写手子 Agent 的系统指引，限定其只做纯文本叙事生成。
+const writerSubAgentInstruction = `你是互动故事的叙事写手，负责产出高质量的纯叙事文本。
+
+职责：
+- 根据主 Agent 提供的上下文（当前场景、角色状态、文风要求、字数目标、前文衔接要点）创作叙事正文。
+- 输出场景描写、人物对话、心理活动、动作与环境等文学内容。
+
+约束：
+- 你没有任何工具，不要尝试调用工具，也不要输出工具调用格式。
+- 直接输出叙事正文本身，不要输出解释、元评论、Markdown 标题或代码块包裹。
+- 保持与所提供上下文一致的角色性格、说话方式、情节走向和文风。
+- 遵循指定的字数目标，保证叙事完整、自然衔接。`
 func modelRetryConfig(cfg *config.Config, outputGuard func(context.Context, *adk.RetryContext) *adk.RetryDecision) *adk.ModelRetryConfig {
 	retryConfig := &adk.ModelRetryConfig{
 		MaxRetries:  configModelMaxRetries(cfg),

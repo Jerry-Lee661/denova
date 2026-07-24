@@ -21,6 +21,7 @@ type AgentContextSettings struct {
 	Image               AgentContextOverride `toml:"image,omitempty" json:"image,omitempty"`
 	Automation          AgentContextOverride `toml:"automation,omitempty" json:"automation,omitempty"`
 	ContextCompaction   AgentContextOverride `toml:"context_compaction,omitempty" json:"context_compaction,omitempty"`
+	ImageAnalysis       AgentContextOverride `toml:"image_analysis,omitempty" json:"image_analysis,omitempty"`
 }
 
 type AgentContextOverride struct {
@@ -68,6 +69,7 @@ func MergeAgentContextSettings(parent, child AgentContextSettings) AgentContextS
 		Image:               mergeAgentContextOverride(parent.Image, child.Image),
 		Automation:          mergeAgentContextOverride(parent.Automation, child.Automation),
 		ContextCompaction:   mergeAgentContextOverride(parent.ContextCompaction, child.ContextCompaction),
+		ImageAnalysis:       mergeAgentContextOverride(parent.ImageAnalysis, child.ImageAnalysis),
 	}
 }
 

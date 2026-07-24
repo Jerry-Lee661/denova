@@ -139,6 +139,66 @@ func TestResolveAgentModelClearsInheritedDefaultProfileAlias(t *testing.T) {
 	}
 }
 
+func TestResolveAgentModelPassesWriterProfileID(t *testing.T) {
+	cfg := &Config{
+		AgentModels: AgentModelSettings{
+			InteractiveStory: AgentModelOverride{WriterProfileID: "anubis"},
+		},
+	}
+	resolved := ResolveAgentModel(cfg, AgentKindInteractiveStory)
+	if resolved.WriterProfileID != "anubis" {
+		t.Fatalf("writer profile id = %q, want anubis", resolved.WriterProfileID)
+	}
+	// 非 interactive_story 的 agent kind 不设置 writer，应为空。
+	ide := ResolveAgentModel(cfg, AgentKindIDE)
+	if ide.WriterProfileID != "" {
+		t.Fatalf("ide writer profile id = %q, want empty", ide.WriterProfileID)
+	}
+}
+
+func TestResolveProfileModelFallsBackToDefault(t *testing.T) {
+	contextWindow := 500000
+	cfg := &Config{
+		OpenAIAPIKey:  "default-key",
+		OpenAIBaseURL: "https://api.default.example/v1",
+		OpenAIModel:   "default-model",
+		ModelProfiles: []ModelProfileSettings{
+			{ID: "anubis", OpenAIBaseURL: "http://localhost:8080/v1", OpenAIModel: "anubis-mini", ContextWindowTokens: &contextWindow},
+		},
+	}
+	resolved := ResolveProfileModel(cfg, "anubis")
+	if resolved.ProfileID != "anubis" || resolved.OpenAIModel != "anubis-mini" || resolved.OpenAIBaseURL != "http://localhost:8080/v1" {
+		t.Fatalf("writer profile mismatch: %#v", resolved)
+	}
+	// APIKey 未配置时回退到 default。
+	if resolved.OpenAIAPIKey != "default-key" {
+		t.Fatalf("writer api key = %q, want default-key", resolved.OpenAIAPIKey)
+	}
+	if resolved.ContextWindowTokens != contextWindow {
+		t.Fatalf("writer context window = %d, want %d", resolved.ContextWindowTokens, contextWindow)
+	}
+
+	// 未知 profile ID 回退到 default。
+	fallback := ResolveProfileModel(cfg, "nonexistent")
+	if fallback.ProfileID != "default" || fallback.OpenAIModel != "default-model" {
+		t.Fatalf("unknown profile should fall back to default: %#v", fallback)
+	}
+}
+
+func TestMergeAgentModelOverridePassesWriterProfileID(t *testing.T) {
+	parent := AgentModelOverride{WriterProfileID: "parent-writer"}
+	child := AgentModelOverride{WriterProfileID: "child-writer"}
+	merged := mergeAgentModelOverride(parent, child)
+	if merged.WriterProfileID != "child-writer" {
+		t.Fatalf("child writer should override parent: %q", merged.WriterProfileID)
+	}
+	// child 未设置时保留 parent。
+	merged = mergeAgentModelOverride(parent, AgentModelOverride{})
+	if merged.WriterProfileID != "parent-writer" {
+		t.Fatalf("parent writer should be retained: %q", merged.WriterProfileID)
+	}
+}
+
 func TestSanitizeModelProfilesCapsContextWindow(t *testing.T) {
 	tooLarge := 3000000
 	invalid := -1

@@ -14,6 +14,7 @@ type AgentPromptSettings struct {
 	Image               AgentPromptOverride `toml:"image,omitempty" json:"image,omitempty"`
 	Automation          AgentPromptOverride `toml:"automation,omitempty" json:"automation,omitempty"`
 	ContextCompaction   AgentPromptOverride `toml:"context_compaction,omitempty" json:"context_compaction,omitempty"`
+	ImageAnalysis       AgentPromptOverride `toml:"image_analysis,omitempty" json:"image_analysis,omitempty"`
 }
 
 type AgentPromptOverride struct {
@@ -32,6 +33,7 @@ type AgentPromptSourceSettings struct {
 	Image               AgentPromptSourceList `json:"image,omitempty"`
 	Automation          AgentPromptSourceList `json:"automation,omitempty"`
 	ContextCompaction   AgentPromptSourceList `json:"context_compaction,omitempty"`
+	ImageAnalysis       AgentPromptSourceList `json:"image_analysis,omitempty"`
 }
 
 type AgentPromptSourceList struct {
@@ -83,6 +85,7 @@ func MergeAgentPromptSettings(parent, child AgentPromptSettings) AgentPromptSett
 		Image:               mergeAgentPromptOverride(parent.Image, child.Image),
 		Automation:          mergeAgentPromptOverride(parent.Automation, child.Automation),
 		ContextCompaction:   mergeAgentPromptOverride(parent.ContextCompaction, child.ContextCompaction),
+		ImageAnalysis:       mergeAgentPromptOverride(parent.ImageAnalysis, child.ImageAnalysis),
 	}
 }
 

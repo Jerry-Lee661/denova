@@ -10,6 +10,7 @@ const (
 	AgentKindImage               = "image"
 	AgentKindAutomation          = "automation"
 	AgentKindContextCompaction   = "context_compaction"
+	AgentKindImageAnalysis       = "image_analysis"
 )
 
 // AgentKindDefinition is the registry entry for one runtime Agent kind.
@@ -103,6 +104,15 @@ var agentKindRegistry = []AgentKindDefinition{
 		PromptOverride:  func(settings AgentPromptSettings) AgentPromptOverride { return settings.ContextCompaction },
 		SkillOverride:   func(settings AgentSkillSettings) AgentSkillOverride { return settings.ContextCompaction },
 		ContextOverride: func(settings AgentContextSettings) AgentContextOverride { return settings.ContextCompaction },
+	},
+	{
+		Kind:            AgentKindImageAnalysis,
+		SessionID:       "image-analysis-agent",
+		ModelOverride:   func(settings AgentModelSettings) AgentModelOverride { return settings.ImageAnalysis },
+		ToolOverride:    func(settings AgentToolSettings) AgentToolOverride { return settings.ImageAnalysis },
+		PromptOverride:  func(settings AgentPromptSettings) AgentPromptOverride { return settings.ImageAnalysis },
+		SkillOverride:   func(settings AgentSkillSettings) AgentSkillOverride { return settings.ImageAnalysis },
+		ContextOverride: func(settings AgentContextSettings) AgentContextOverride { return settings.ImageAnalysis },
 	},
 }
 

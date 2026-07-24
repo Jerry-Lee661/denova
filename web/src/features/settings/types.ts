@@ -98,6 +98,7 @@ export interface AgentModelOverride {
   temperature?: number | null
   enable_thinking?: boolean | null
   reasoning_effort?: string
+  writer_profile_id?: string
 }
 
 export interface AgentToolSettings {

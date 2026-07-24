@@ -32,6 +32,7 @@ type AgentModelSettings struct {
 	Image               AgentModelOverride `toml:"image,omitempty" json:"image,omitempty"`
 	Automation          AgentModelOverride `toml:"automation,omitempty" json:"automation,omitempty"`
 	ContextCompaction   AgentModelOverride `toml:"context_compaction,omitempty" json:"context_compaction,omitempty"`
+	ImageAnalysis       AgentModelOverride `toml:"image_analysis,omitempty" json:"image_analysis,omitempty"`
 }
 
 type AgentModelOverride struct {
@@ -39,6 +40,10 @@ type AgentModelOverride struct {
 	Temperature     *float64 `toml:"temperature,omitempty" json:"temperature,omitempty"`
 	EnableThinking  *bool    `toml:"enable_thinking,omitempty" json:"enable_thinking,omitempty"`
 	ReasoningEffort string   `toml:"reasoning_effort,omitempty" json:"reasoning_effort,omitempty"`
+	// WriterProfileID 指定叙事写手模型配置。非空时，interactive_story 主 Agent
+	// 会将纯叙事文本生成委派给该模型（自动 disable_tools），避免本地模型的
+	// PEG tool-call grammar 与自由文本输出冲突。仅 interactive_story 生效。
+	WriterProfileID string `toml:"writer_profile_id,omitempty" json:"writer_profile_id,omitempty"`
 }
 
 type ResolvedModelSettings struct {
@@ -51,6 +56,8 @@ type ResolvedModelSettings struct {
 	EnableThinking      *bool
 	ReasoningEffort     string
 	DisableTools        bool
+	// WriterProfileID 是已解析的叙事写手模型配置 ID，空表示未配置写手。
+	WriterProfileID string
 }
 
 func MergeAgentModelSettings(parent, child AgentModelSettings) AgentModelSettings {
@@ -65,6 +72,7 @@ func MergeAgentModelSettings(parent, child AgentModelSettings) AgentModelSetting
 		Image:               mergeAgentModelOverride(parent.Image, child.Image),
 		Automation:          mergeAgentModelOverride(parent.Automation, child.Automation),
 		ContextCompaction:   mergeAgentModelOverride(parent.ContextCompaction, child.ContextCompaction),
+		ImageAnalysis:       mergeAgentModelOverride(parent.ImageAnalysis, child.ImageAnalysis),
 	}
 }
 
@@ -72,36 +80,8 @@ func ResolveAgentModel(cfg *Config, agentKind string) ResolvedModelSettings {
 	if cfg == nil {
 		return ResolvedModelSettings{}
 	}
-	profiles := map[string]ModelProfileSettings{
-		"default": legacyModelProfile(cfg),
-	}
-	for _, profile := range cfg.ModelProfiles {
-		id := modelProfileID(profile)
-		if id == "" {
-			continue
-		}
-		base := profiles[id]
-		profile.ID = id
-		profiles[id] = mergeModelProfile(base, profile)
-	}
+	profiles := buildModelProfileMap(cfg)
 	defaultProfile := profiles["default"]
-	if defaultProfile.OpenAIAPIKey == "" {
-		defaultProfile.OpenAIAPIKey = cfg.OpenAIAPIKey
-	}
-	if defaultProfile.OpenAIBaseURL == "" {
-		defaultProfile.OpenAIBaseURL = cfg.OpenAIBaseURL
-	}
-	if defaultProfile.OpenAIModel == "" {
-		defaultProfile.OpenAIModel = cfg.OpenAIModel
-	}
-	if defaultProfile.ContextWindowTokens == nil {
-		contextWindowTokens := cfg.OpenAIContextWindowTokens
-		if contextWindowTokens <= 0 {
-			contextWindowTokens = DefaultContextWindowTokens
-		}
-		defaultProfile.ContextWindowTokens = intPtr(contextWindowTokens)
-	}
-	profiles["default"] = defaultProfile
 
 	defaultOverride := cfg.AgentModels.Default
 	agentOverride := mergeAgentModelOverride(defaultOverride, agentModelOverrideFor(cfg.AgentModels, agentKind))
@@ -143,6 +123,88 @@ func ResolveAgentModel(cfg *Config, agentKind string) ResolvedModelSettings {
 		ContextWindowTokens: *profile.ContextWindowTokens,
 		EnableThinking:      agentOverride.EnableThinking,
 		ReasoningEffort:     normalizeReasoningEffort(agentOverride.ReasoningEffort),
+		DisableTools:        disableTools,
+		WriterProfileID:     normalizeModelProfileID(agentOverride.WriterProfileID),
+	}
+}
+
+// buildModelProfileMap 构建已合并默认值的模型配置映射，"default" 条目已回填
+// 顶层 OpenAI* 配置与上下文窗口默认值。供 ResolveAgentModel 与
+// ResolveProfileModel 复用，避免重复的映射构建逻辑。
+func buildModelProfileMap(cfg *Config) map[string]ModelProfileSettings {
+	profiles := map[string]ModelProfileSettings{
+		"default": legacyModelProfile(cfg),
+	}
+	for _, profile := range cfg.ModelProfiles {
+		id := modelProfileID(profile)
+		if id == "" {
+			continue
+		}
+		base := profiles[id]
+		profile.ID = id
+		profiles[id] = mergeModelProfile(base, profile)
+	}
+	defaultProfile := profiles["default"]
+	if defaultProfile.OpenAIAPIKey == "" {
+		defaultProfile.OpenAIAPIKey = cfg.OpenAIAPIKey
+	}
+	if defaultProfile.OpenAIBaseURL == "" {
+		defaultProfile.OpenAIBaseURL = cfg.OpenAIBaseURL
+	}
+	if defaultProfile.OpenAIModel == "" {
+		defaultProfile.OpenAIModel = cfg.OpenAIModel
+	}
+	if defaultProfile.ContextWindowTokens == nil {
+		contextWindowTokens := cfg.OpenAIContextWindowTokens
+		if contextWindowTokens <= 0 {
+			contextWindowTokens = DefaultContextWindowTokens
+		}
+		defaultProfile.ContextWindowTokens = intPtr(contextWindowTokens)
+	}
+	profiles["default"] = defaultProfile
+	return profiles
+}
+
+// ResolveProfileModel 按 profile ID 解析模型配置，缺失字段回退到 default profile。
+// profileID 为空或未找到时回退到 default。用于解析叙事写手等按 ID 指定的模型。
+func ResolveProfileModel(cfg *Config, profileID string) ResolvedModelSettings {
+	if cfg == nil {
+		return ResolvedModelSettings{}
+	}
+	profiles := buildModelProfileMap(cfg)
+	defaultProfile := profiles["default"]
+	id := normalizeModelProfileID(profileID)
+	if id == "" {
+		id = "default"
+	}
+	profile, ok := profiles[id]
+	if !ok {
+		id = "default"
+		profile = defaultProfile
+	}
+	if profile.OpenAIAPIKey == "" {
+		profile.OpenAIAPIKey = defaultProfile.OpenAIAPIKey
+	}
+	if profile.OpenAIBaseURL == "" {
+		profile.OpenAIBaseURL = defaultProfile.OpenAIBaseURL
+	}
+	if profile.OpenAIModel == "" {
+		profile.OpenAIModel = defaultProfile.OpenAIModel
+	}
+	if profile.ContextWindowTokens == nil {
+		profile.ContextWindowTokens = defaultProfile.ContextWindowTokens
+	}
+	disableTools := false
+	if profile.DisableTools != nil {
+		disableTools = *profile.DisableTools
+	}
+	return ResolvedModelSettings{
+		ProfileID:           id,
+		OpenAIAPIKey:        profile.OpenAIAPIKey,
+		OpenAIBaseURL:       profile.OpenAIBaseURL,
+		OpenAIModel:         profile.OpenAIModel,
+		Temperature:         profile.Temperature,
+		ContextWindowTokens: *profile.ContextWindowTokens,
 		DisableTools:        disableTools,
 	}
 }
@@ -281,6 +343,9 @@ func mergeAgentModelOverride(parent, child AgentModelOverride) AgentModelOverrid
 	}
 	if child.ReasoningEffort != "" {
 		out.ReasoningEffort = normalizeReasoningEffort(child.ReasoningEffort)
+	}
+	if child.WriterProfileID != "" {
+		out.WriterProfileID = normalizeModelProfileID(child.WriterProfileID)
 	}
 	return out
 }

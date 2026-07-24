@@ -34,7 +34,7 @@ type Task struct {
 	status    TaskStatus
 	finished  bool
 	events    []agent.Event
-	subs      []chan agent.Event
+	subs      []*subscriber
 	cancel    context.CancelFunc
 
 	// 批量节流：高频事件合并后按类型分间隔发送
@@ -43,11 +43,26 @@ type Task struct {
 	batchTimer   *time.Timer
 }
 
+// subscriber 包装一个订阅者 channel，并跟踪背压丢事件情况。
+// 当连续发送失败超过阈值时主动断开该订阅者，让 SSE 消费端感知断流并触发
+// 重连回放（snapshot 含完整历史），而非静默持续丢弃导致前端状态长期落后。
+type subscriber struct {
+	ch chan agent.Event
+	// consecutiveDrops 记录连续发送失败的次数；任意一次成功发送即归零。
+	// 使用原子操作，因为 sendEvent/sendBatch 可能从 run goroutine 与
+	// time.AfterFunc 回调 goroutine 并发调用。
+	consecutiveDrops atomic.Int64
+}
+
 const (
 	taskSubscriberBuffer     = 1024                  // channel 缓冲大小（原 256）
 	taskBatchInterval        = 30 * time.Millisecond // 批量事件统一合并间隔（顺序优先）
 	taskBatchSize            = 200                   // 达到此数量立即 flush
 	taskSubscribeReplaySlack = 256                   // 回放期间给实时事件预留的额外缓冲
+	// taskSubscriberMaxConsecutiveDrops 是主动断开慢订阅者的背压阈值。
+	// 批量事件约每 30ms 发送一次，连续 50 次失败约等于 1.5s 持续无法消费，
+	// 足以区分“短暂卡顿（会自愈）”与“真正掉线/标签页冻结（应断开重连）”。
+	taskSubscriberMaxConsecutiveDrops = 50
 )
 
 // NewTask 创建并启动后台任务。run 函数在独立 goroutine 中执行。
@@ -151,7 +166,7 @@ func (t *Task) sendEvent(ev agent.Event) {
 	if ev.Type == "aborted" {
 		t.status = TaskAborted
 	}
-	subs := make([]chan agent.Event, len(t.subs))
+	subs := make([]*subscriber, len(t.subs))
 	copy(subs, t.subs)
 	eventCount := len(t.events)
 	subCount := len(t.subs)
@@ -159,13 +174,19 @@ func (t *Task) sendEvent(ev agent.Event) {
 	if shouldLogEvent(ev.Type, eventCount) {
 		observability.Info("agent-task", "task_event", slog.String("task_id", t.id), slog.String("event_type", ev.Type), slog.Int("events", eventCount), slog.Int("subscribers", subCount))
 	}
-	for _, ch := range subs {
+	var slow []*subscriber
+	for _, sub := range subs {
 		select {
-		case ch <- ev:
+		case sub.ch <- ev:
+			sub.consecutiveDrops.Store(0)
 		default:
 			observability.Warn("agent-task", "task_event_dropped", slog.String("task_id", t.id), slog.String("event_type", ev.Type), slog.String("reason", "subscriber_slow"))
+			if sub.consecutiveDrops.Add(1) >= taskSubscriberMaxConsecutiveDrops {
+				slow = append(slow, sub)
+			}
 		}
 	}
+	t.disconnectSlowSubscribers(slow)
 }
 
 // sendBatch 批量发送合并事件。使用单个合并事件包装，大幅减少通道发送次数。
@@ -181,7 +202,7 @@ func (t *Task) sendBatch(batch []agent.Event) {
 	}
 	// 将批量事件追加到历史，但不逐个新增事件计数
 	t.events = append(t.events, batch...)
-	subs := make([]chan agent.Event, len(t.subs))
+	subs := make([]*subscriber, len(t.subs))
 	copy(subs, t.subs)
 	subCount := len(t.subs)
 	t.mu.Unlock()
@@ -197,9 +218,11 @@ func (t *Task) sendBatch(batch []agent.Event) {
 			"kinds":  batchKinds(batch),
 		},
 	}
-	for _, ch := range subs {
+	var slow []*subscriber
+	for _, sub := range subs {
 		select {
-		case ch <- merged:
+		case sub.ch <- merged:
+			sub.consecutiveDrops.Store(0)
 		default:
 			for _, ev := range batch {
 				// 合并发送失败时，尽力逐条发送批量中的每个事件
@@ -207,13 +230,45 @@ func (t *Task) sendBatch(batch []agent.Event) {
 					continue
 				}
 				select {
-				case ch <- ev:
+				case sub.ch <- ev:
 				default:
 				}
 			}
 			observability.Warn("agent-task", "task_batch_dropped", slog.String("task_id", t.id), slog.Int("dropped", len(batch)), slog.String("reason", "subscriber_slow"))
+			if sub.consecutiveDrops.Add(1) >= taskSubscriberMaxConsecutiveDrops {
+				slow = append(slow, sub)
+			}
 		}
 	}
+	t.disconnectSlowSubscribers(slow)
+}
+
+// disconnectSlowSubscribers 主动断开持续无法消费事件的订阅者。
+// 关闭其 channel 使 SSE 消费端的 range 循环退出，从而触发客户端重连；
+// 重连时 Subscribe 会回放完整 snapshot，补齐被丢弃的高频事件。
+func (t *Task) disconnectSlowSubscribers(slow []*subscriber) {
+	if len(slow) == 0 {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.finished {
+		return
+	}
+	slowSet := make(map[*subscriber]bool, len(slow))
+	for _, sub := range slow {
+		slowSet[sub] = true
+	}
+	remaining := t.subs[:0]
+	for _, sub := range t.subs {
+		if slowSet[sub] {
+			close(sub.ch)
+			observability.Warn("agent-task", "task_subscriber_disconnected", slog.String("task_id", t.id), slog.Int("threshold", taskSubscriberMaxConsecutiveDrops), slog.String("reason", "subscriber_slow"))
+			continue
+		}
+		remaining = append(remaining, sub)
+	}
+	t.subs = remaining
 }
 
 // batchKinds 返回批量中不同事件类型的计数摘要。
@@ -233,8 +288,8 @@ func (t *Task) finish() {
 		t.status = TaskDone
 	}
 	t.finished = true
-	for _, ch := range t.subs {
-		close(ch)
+	for _, sub := range t.subs {
+		close(sub.ch)
 	}
 	t.subs = nil
 	observability.Info("agent-task", "task_finish", slog.String("task_id", t.id), slog.String("status", string(t.status)), slog.Int("events", len(t.events)), slog.Duration("duration", time.Since(t.startedAt).Round(time.Millisecond)))
@@ -261,7 +316,7 @@ func (t *Task) Subscribe() ([]agent.Event, <-chan agent.Event) {
 		bufferSize = replayBuffer
 	}
 	ch := make(chan agent.Event, bufferSize)
-	t.subs = append(t.subs, ch)
+	t.subs = append(t.subs, &subscriber{ch: ch})
 	observability.Info("agent-task", "task_subscribe", slog.String("task_id", t.id), slog.String("status", string(t.status)), slog.Int("replay", len(snapshot)), slog.Int("subscribers", len(t.subs)), slog.Bool("live", true))
 	return snapshot, ch
 }
@@ -271,7 +326,7 @@ func (t *Task) Unsubscribe(ch <-chan agent.Event) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for i, sub := range t.subs {
-		if sub == ch {
+		if sub.ch == ch {
 			t.subs = append(t.subs[:i], t.subs[i+1:]...)
 			observability.Info("agent-task", "task_unsubscribe", slog.String("task_id", t.id), slog.Int("subscribers", len(t.subs)))
 			return

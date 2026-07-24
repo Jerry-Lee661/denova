@@ -72,3 +72,49 @@ func TestTaskBatchPreservesCrossTypeEmissionOrder(t *testing.T) {
 
 	task.Unsubscribe(ch)
 }
+
+// TestTaskDisconnectsSlowSubscriber 验证持续无法消费事件的订阅者会被主动断开：
+// 当连续丢事件次数达到阈值时，其 channel 被关闭，使 SSE 消费端感知断流并重连。
+func TestTaskDisconnectsSlowSubscriber(t *testing.T) {
+	task := &Task{status: TaskRunning}
+	// 订阅者 channel 缓冲为 taskSubscriberBuffer；需先填满缓冲，再连续丢
+	// taskSubscriberMaxConsecutiveDrops 次才会触发断开。关键事件（非
+	// thinking/chunk/tool_args_delta）走 sendEvent 单条发送路径。
+	total := taskSubscriberBuffer + taskSubscriberMaxConsecutiveDrops + 5
+	for i := 0; i < total; i++ {
+		task.sendEvent(agent.Event{Type: "status", Data: map[string]any{"i": i}})
+	}
+
+	task.mu.Lock()
+	subCount := len(task.subs)
+	task.mu.Unlock()
+	if subCount != 0 {
+		t.Fatalf("slow subscriber should have been disconnected, still %d subscriber(s)", subCount)
+	}
+}
+
+// TestTaskKeepsHealthySubscriber 验证正常消费的订阅者不会被误断开：
+// 只要订阅者持续读取事件，连续丢事件计数会被归零，不会触发断开。
+func TestTaskKeepsHealthySubscriber(t *testing.T) {
+	task := &Task{status: TaskRunning}
+	_, ch := task.Subscribe()
+
+	for i := 0; i < taskSubscriberMaxConsecutiveDrops*2; i++ {
+		task.sendEvent(agent.Event{Type: "status", Data: map[string]any{"i": i}})
+		// 立即消费，模拟健康订阅者。
+		select {
+		case <-ch:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for event on healthy subscriber")
+		}
+	}
+
+	task.mu.Lock()
+	subCount := len(task.subs)
+	task.mu.Unlock()
+	if subCount != 1 {
+		t.Fatalf("healthy subscriber should remain connected, got %d subscriber(s)", subCount)
+	}
+
+	task.Unsubscribe(ch)
+}

@@ -14,6 +14,7 @@ type AgentSkillSettings struct {
 	Image               AgentSkillOverride `toml:"image,omitempty" json:"image,omitempty"`
 	Automation          AgentSkillOverride `toml:"automation,omitempty" json:"automation,omitempty"`
 	ContextCompaction   AgentSkillOverride `toml:"context_compaction,omitempty" json:"context_compaction,omitempty"`
+	ImageAnalysis       AgentSkillOverride `toml:"image_analysis,omitempty" json:"image_analysis,omitempty"`
 }
 
 // AgentSkillOverride maps skill name to an explicit availability override.
@@ -31,6 +32,7 @@ func MergeAgentSkillSettings(parent, child AgentSkillSettings) AgentSkillSetting
 		Image:               mergeAgentSkillOverride(parent.Image, child.Image),
 		Automation:          mergeAgentSkillOverride(parent.Automation, child.Automation),
 		ContextCompaction:   mergeAgentSkillOverride(parent.ContextCompaction, child.ContextCompaction),
+		ImageAnalysis:       mergeAgentSkillOverride(parent.ImageAnalysis, child.ImageAnalysis),
 	}
 }
 

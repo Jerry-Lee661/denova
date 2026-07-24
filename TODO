@@ -7,7 +7,7 @@
 - **根因**: SSE 消费端 (`internal/api/sse/task.go`) 写入 io.Pipe 时被阻塞（浏览器标签不活跃 / 网络抖动 / replay 快照过大导致 live 事件堆积），channel buffer(1024) 满后事件被丢弃
 - **影响**: 低。仅丢失高频事件 (thinking/chunk/tool_args_delta)，完整历史在 t.events 中，客户端重连可通过 snapshot 回放补齐
 - **优化方向**:
-  - [ ] 监控频繁丢事件的订阅者，考虑主动断开慢消费者而非静默丢弃
+  - [x] 监控频繁丢事件的订阅者，考虑主动断开慢消费者而非静默丢弃（已实现：`subscriber` 结构跟踪连续丢事件计数，达阈值 `taskSubscriberMaxConsecutiveDrops` 主动关闭 channel，SSE 消费端感知断流后重连回放）
   - [ ] 评估 replay 快照过大时的增量回放策略，减少订阅瞬间的 buffer 压力
   - [ ] 前端 useChat 渲染性能排查，避免 React 渲染慢导致 fetch 读取滞后
   - [ ] 考虑为 dropped 事件增加前端提示或自动重连机制
@@ -71,12 +71,12 @@ writer_profile_id = "anubis"      # 写手：本地模型，自动 disable_tools
 
 ### 实施步骤
 
-- [ ] config: `AgentModelOverride` + `ResolvedModelSettings` 加 `WriterProfileID`
-- [ ] config: `mergeAgentModelOverride` + `ResolveAgentModel` 传递
-- [ ] agent/builder: `buildDeepAgent` 自动创建 writer 子 Agent
-- [ ] agent/builder: 主 Agent instruction 追加委派指引
-- [ ] 前端 types: `AgentModelOverride` 加 `writer_profile_id`
-- [ ] 前端 AgentsView: writer profile 下拉选择
-- [ ] i18n: 双语标签
-- [ ] 编译 + 测试验证
+- [x] config: `AgentModelOverride` + `ResolvedModelSettings` 加 `WriterProfileID`
+- [x] config: `mergeAgentModelOverride` + `ResolveAgentModel` 传递（另新增 `ResolveProfileModel` 按 profile ID 解析写手模型）
+- [x] agent/builder: `buildDeepAgent` 自动创建 writer 子 Agent（`buildWriterSubAgent`，强制 disable_tools、无工具、单轮纯文本）
+- [x] agent/builder: 主 Agent instruction 追加委派指引（`buildWriterDelegationInstruction`）
+- [x] 前端 types: `AgentModelOverride` 加 `writer_profile_id`
+- [x] 前端 AgentsView: writer profile 下拉选择（仅 interactive_story 显示）
+- [x] i18n: 双语标签（`agents.field.writerProfile`）
+- [x] 编译 + 测试验证（go build ./... 通过；config/agent 测试通过；前端 tsc + build 通过）
 - [ ] 实际运行验证：DeepSeek 主模型 + Anubis writer，确认无 PEG 警告

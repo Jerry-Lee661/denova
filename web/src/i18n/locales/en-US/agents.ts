@@ -60,6 +60,7 @@ const agents = {
   'agents.section.context': 'Context',
   'agents.section.subAgents': 'SubAgents',
   'agents.field.modelProfile': 'Model Profile',
+  'agents.field.writerProfile': 'Narrative Writer Model',
   'agents.field.thinking': 'Thinking',
   'agents.field.reasoningEffort': 'Reasoning Effort',
   'agents.field.compactionEnabled': 'Auto Compaction',

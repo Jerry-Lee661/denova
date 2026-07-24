@@ -60,6 +60,7 @@ const agents = {
   'agents.section.context': '上下文',
   'agents.section.subAgents': 'SubAgents',
   'agents.field.modelProfile': '模型配置',
+  'agents.field.writerProfile': '叙事写手模型',
   'agents.field.thinking': '思考开关',
   'agents.field.reasoningEffort': '推理强度',
   'agents.field.compactionEnabled': '自动压缩',

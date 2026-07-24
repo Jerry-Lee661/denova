@@ -278,6 +278,7 @@ export function AgentsView({ onClose }: { onClose?: () => void }) {
               <AgentHeader agent={selected} />
               {activeLayer === 'user' ? (
                 <AgentModelSection
+                  agentKey={selected.key}
                   value={modelValue}
                   inherited={inheritedModel}
                   profiles={profileOptions}
@@ -393,7 +394,8 @@ function AgentHeader({ agent }: { agent: AgentViewDefinition }) {
   )
 }
 
-function AgentModelSection({ value, inherited, profiles, onChange }: {
+function AgentModelSection({ agentKey, value, inherited, profiles, onChange }: {
+  agentKey: string
   value: AgentModelOverride
   inherited: AgentModelOverride
   profiles: Array<{ id: string; label: string }>
@@ -404,10 +406,14 @@ function AgentModelSection({ value, inherited, profiles, onChange }: {
   const hasTemperature = value.temperature !== undefined && value.temperature !== null
   const hasThinking = value.enable_thinking !== undefined && value.enable_thinking !== null
   const hasEffort = hasTextOverride(value.reasoning_effort)
+  const hasWriter = hasTextOverride(value.writer_profile_id)
   const effectiveProfile = hasProfile ? value.profile_id || 'default' : inherited.profile_id || 'default'
   const effectiveTemperature = hasTemperature ? value.temperature : inherited.temperature
   const effectiveThinking = hasThinking ? value.enable_thinking : inherited.enable_thinking
   const effectiveEffort = hasEffort ? value.reasoning_effort || '' : inherited.reasoning_effort || ''
+  const effectiveWriter = hasWriter ? value.writer_profile_id || '__none__' : inherited.writer_profile_id || '__none__'
+  // 叙事写手模型仅 interactive_story 支持：主模型处理协议工具，纯叙事文本委派给写手。
+  const showWriterProfile = agentKey === 'interactive_story'
 
   return (
     <section className="flex flex-col gap-3 border-b border-[var(--nova-border)] pb-5">
@@ -425,6 +431,21 @@ function AgentModelSection({ value, inherited, profiles, onChange }: {
             </SelectContent>
           </Select>
         </Field>
+        {showWriterProfile && (
+          <Field label={t('agents.field.writerProfile')} inherited={!hasWriter} onReset={hasWriter ? () => onChange({ writer_profile_id: '' }) : undefined}>
+            <Select value={effectiveWriter} onValueChange={(profileID) => onChange({ writer_profile_id: profileID === '__none__' ? '' : profileID })}>
+              <SelectTrigger size="sm" className="min-w-0 flex-1" aria-label={t('agents.field.writerProfile')}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  <SelectItem value="__none__">{t('agents.option.platformDefault')}</SelectItem>
+                  {profiles.map((profile) => <SelectItem key={profile.id} value={profile.id}>{profile.label}</SelectItem>)}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          </Field>
+        )}
         <Field label="Temperature" inherited={!hasTemperature} onReset={hasTemperature ? () => onChange({ temperature: null }) : undefined}>
           <Input
             type="number"
@@ -1527,6 +1548,7 @@ function mergeAgentModelOverride(parent: AgentModelOverride, child: AgentModelOv
     temperature: child.temperature ?? parent.temperature,
     enable_thinking: child.enable_thinking ?? parent.enable_thinking,
     reasoning_effort: child.reasoning_effort || parent.reasoning_effort,
+    writer_profile_id: child.writer_profile_id || parent.writer_profile_id,
   }
 }
 
