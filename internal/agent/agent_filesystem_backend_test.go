@@ -165,9 +165,9 @@ func readFile(t *testing.T, filePath string) string {
 func TestFileReadCacheHitReturnsCachedContent(t *testing.T) {
 	path := writeTempFile(t, "line one\nline two\nline three\n")
 	cache := newFileReadCache(fileReadCacheDefaultMaxBytes)
-	cache.set(path, "line one\nline two\nline three\n")
+	cache.set(path, "line one\nline two\nline three\n", 1, 3)
 
-	got, ok := cache.get(path)
+	got, ok := cache.get(path, 1, 4)
 	if !ok {
 		t.Fatal("cache should return cached content")
 	}
@@ -179,7 +179,7 @@ func TestFileReadCacheHitReturnsCachedContent(t *testing.T) {
 func TestFileReadCacheMissesWhenFileModified(t *testing.T) {
 	path := writeTempFile(t, "original\n")
 	cache := newFileReadCache(fileReadCacheDefaultMaxBytes)
-	cache.set(path, "original\n")
+	cache.set(path, "original\n", 1, 1)
 
 	// Modify the file on disk
 	time.Sleep(10 * time.Millisecond) // ensure mtime changes on fast filesystems
@@ -187,7 +187,7 @@ func TestFileReadCacheMissesWhenFileModified(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, ok := cache.get(path); ok {
+	if _, ok := cache.get(path, 1, 2); ok {
 		t.Fatal("cache should miss when file mtime changed")
 	}
 }
@@ -202,15 +202,15 @@ func TestFileReadCacheEvictsLRUWhenFull(t *testing.T) {
 	writeFile(t, path1, "aaaaaaaaaaaaaaa\n")
 	writeFile(t, path2, "bbbbbbbbbbbbbbb\n")
 
-	cache.set(path1, "aaaaaaaaaaaaaaa\n")
-	cache.set(path2, "bbbbbbbbbbbbbbb\n")
+	cache.set(path1, "aaaaaaaaaaaaaaa\n", 1, 1)
+	cache.set(path2, "bbbbbbbbbbbbbbb\n", 1, 1)
 
 	// The first entry should have been evicted
-	if _, ok := cache.get(path1); ok {
+	if _, ok := cache.get(path1, 1, 2); ok {
 		t.Fatal("oldest entry should be evicted when cache overflows")
 	}
 	// The second entry should still be present
-	if _, ok := cache.get(path2); !ok {
+	if _, ok := cache.get(path2, 1, 2); !ok {
 		t.Fatal("newer entry should remain in cache")
 	}
 }

@@ -1,0 +1,82 @@
+# TODO
+
+## SSE 订阅者背压丢事件 (task_batch_dropped / subscriber_slow)
+
+- **现象**: 后端日志出现 `task_batch_dropped component=agent-task dropped=1 reason=subscriber_slow`
+- **位置**: `internal/app/task.go:204` sendBatch() 非阻塞写入订阅者 channel 失败
+- **根因**: SSE 消费端 (`internal/api/sse/task.go`) 写入 io.Pipe 时被阻塞（浏览器标签不活跃 / 网络抖动 / replay 快照过大导致 live 事件堆积），channel buffer(1024) 满后事件被丢弃
+- **影响**: 低。仅丢失高频事件 (thinking/chunk/tool_args_delta)，完整历史在 t.events 中，客户端重连可通过 snapshot 回放补齐
+- **优化方向**:
+  - [ ] 监控频繁丢事件的订阅者，考虑主动断开慢消费者而非静默丢弃
+  - [ ] 评估 replay 快照过大时的增量回放策略，减少订阅瞬间的 buffer 压力
+  - [ ] 前端 useChat 渲染性能排查，避免 React 渲染慢导致 fetch 读取滞后
+  - [ ] 考虑为 dropped 事件增加前端提示或自动重连机制
+
+## 本地模型 PEG 冲突：Writer 子 Agent 复合模型方案
+
+- **现象**: 本地 llama.cpp 模型（如 Anubis-Mini-8B）在 interactive_story 场景下，eino deep-agent 框架每次 LLM 调用都通过 `model.WithTools(...)` 注入 tools 数组到请求 body，触发 llama.cpp 的 Llama 3 native PEG tool-call grammar。模型输出 markdown 代码块（` ``` `）时 PEG 解析失败，产生 `common_chat_peg_parse: unparsed peg-native output` 警告，并可能导致 `srv stop: cancel task` 取消生成
+- **根因**: interactive_story 的协议工具（`submit_interactive_turn` 等）必须由主模型调用，不能简单 `disable_tools=true` 全部禁掉；但叙事文本生成部分不需要 tools，本地模型的 PEG grammar 与自由文本输出冲突
+- **影响**: 中。本地模型用于 interactive_story 时生成可能被中断或产生解析错误
+- **已完成**: `disable_tools` 配置项（`ModelProfileSettings.DisableTools`），适用于纯生成场景（如 IDE 写作、version_summary 等不需要 tools 的 agent kind）
+
+### 修改方案：`writer_profile_id` 复合模型
+
+**架构**:
+```
+用户消息 → 主模型 (DeepSeek/远程, 带 tools + 协议工具)
+               │
+               ├── 处理协议工具 (submit_interactive_turn, read_lore, ...)
+               ├── 处理 skills / sub-agents / compaction
+               │
+               └── 需要生成叙事文本时 → transfer 给 Writer 子 Agent
+                                          │  (本地模型, disable_tools=true)
+                                          │  (无 skills, 无 sub-agents, 无 tools)
+                                          └── 纯文本输出，不触发 PEG
+                                               │
+                                               └── 返回文本 → 主模型包装提交
+```
+
+**配置效果** (TOML):
+```toml
+[agent_models.interactive_story]
+profile_id = "deepseek"           # 主模型：带 tools
+writer_profile_id = "anubis"      # 写手：本地模型，自动 disable_tools
+```
+
+**改动清单**:
+
+| 层 | 文件 | 改动 |
+|----|------|------|
+| config | `config/model_profiles.go` | `AgentModelOverride` 加 `WriterProfileID string` |
+| config | `config/model_profiles.go` | `ResolvedModelSettings` 加 `WriterProfileID string`；`ResolveAgentModel` 传递 |
+| config | `config/model_profiles.go` | `mergeAgentModelOverride` 传递 `WriterProfileID` |
+| agent | `internal/agent/builder.go` | `buildDeepAgent` 检测 `WriterProfileID`，非空时自动创建 tool-less writer 子 Agent（`disable_tools=true`，无 skills，无 sub-agents，instruction 为纯叙事生成指引） |
+| agent | `internal/agent/builder.go` | 主 Agent instruction 追加委派指引："当需要生成叙事/对话/描写文本时，请 transfer 给 writer 子 Agent" |
+| agent | `internal/agent/builder.go` | writer 子 Agent 的 `deepAgentSpec` 设置 `DisableWriteTodos=true`，`EnableSkills=false`，`ExtraToolsFactory=nil` |
+| 前端 | `web/src/features/settings/types.ts` | `AgentModelOverride` 加 `writer_profile_id?: string` |
+| 前端 | `web/src/features/agents/AgentsView.tsx` | agent model 编辑区加 writer profile 下拉选择（仅 interactive_story 显示） |
+| i18n | `web/src/i18n/locales/zh-CN/agents.ts` | 加 `agents.field.writerProfile` = "叙事写手模型" |
+| i18n | `web/src/i18n/locales/en-US/agents.ts` | 加 `agents.field.writerProfile` = "Narrative Writer Model" |
+
+**运行时行为**:
+1. DeepSeek 处理所有协议工具、lore 读取、状态管理、compaction
+2. 需要生成叙事文本时，DeepSeek transfer 给 writer 子 Agent
+3. Writer 子 Agent 用本地模型纯生成，请求 body 无 `tools` → 无 PEG 冲突
+4. Writer 返回文本 → DeepSeek 包装进 `submit_interactive_turn` 提交
+
+**约束**:
+- 零侵入：不改 interactive story 协议、不改前端交互流程、不改 teller/director 逻辑
+- Writer 子 Agent 仅用于 interactive_story；其他 agent kind 不受影响
+- 如果 `writer_profile_id` 为空，行为与当前完全一致（向后兼容）
+
+### 实施步骤
+
+- [ ] config: `AgentModelOverride` + `ResolvedModelSettings` 加 `WriterProfileID`
+- [ ] config: `mergeAgentModelOverride` + `ResolveAgentModel` 传递
+- [ ] agent/builder: `buildDeepAgent` 自动创建 writer 子 Agent
+- [ ] agent/builder: 主 Agent instruction 追加委派指引
+- [ ] 前端 types: `AgentModelOverride` 加 `writer_profile_id`
+- [ ] 前端 AgentsView: writer profile 下拉选择
+- [ ] i18n: 双语标签
+- [ ] 编译 + 测试验证
+- [ ] 实际运行验证：DeepSeek 主模型 + Anubis writer，确认无 PEG 警告

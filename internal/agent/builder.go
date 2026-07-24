@@ -135,7 +135,8 @@ type deepAgentSpec struct {
 }
 
 func buildDeepAgent(ctx context.Context, cfg *config.Config, spec deepAgentSpec) (adk.Agent, error) {
-	modelCfg := chatModelConfigForAgent(cfg, spec.Kind)
+	resolved := resolvedModelSettingsForAgent(cfg, spec.Kind)
+	modelCfg := chatModelConfigFromResolved(resolved)
 	toolSettings := config.ResolveAgentTools(cfg, spec.Kind)
 	cm, err := openai.NewChatModel(ctx, &modelCfg)
 	if err != nil {
@@ -145,22 +146,47 @@ func buildDeepAgent(ctx context.Context, cfg *config.Config, spec deepAgentSpec)
 	// agent 包不感知具体 provider；新增 provider 的兼容性处理只需在 providercompat 里加。
 	chatModel := providercompat.Wrap(cm, modelCfg)
 
-	assembly, err := buildChatModelAgentAssembly(ctx, cfg, chatModelAgentAssemblySpec{
-		Kind:              spec.Kind,
-		ModelCfg:          modelCfg,
-		ToolSettings:      toolSettings,
-		EnableSkills:      spec.EnableSkills,
-		ExtraHandlers:     spec.ExtraHandlers,
-		ExtraTools:        spec.ExtraTools,
-		ExtraToolsFactory: spec.ExtraToolsFactory,
-		IncludeCompaction: true,
-	})
-	if err != nil {
-		return nil, err
+	// When the model profile has disable_tools=true, skip all tool assembly.
+	// This prevents the eino framework from injecting tool definitions into
+	// model requests, which avoids triggering llama.cpp's native PEG tool-call
+	// grammar on local models that don't support structured tool calling.
+	disableTools := resolved.DisableTools
+
+	var assembly chatModelAgentAssembly
+	var subAgents []adk.Agent
+	if !disableTools {
+		assembly, err = buildChatModelAgentAssembly(ctx, cfg, chatModelAgentAssemblySpec{
+			Kind:              spec.Kind,
+			ModelCfg:          modelCfg,
+			ToolSettings:      toolSettings,
+			EnableSkills:      spec.EnableSkills,
+			ExtraHandlers:     spec.ExtraHandlers,
+			ExtraTools:        spec.ExtraTools,
+			ExtraToolsFactory: spec.ExtraToolsFactory,
+			IncludeCompaction: true,
+		})
+		if err != nil {
+			return nil, err
+		}
+		subAgents, err = buildConfiguredSubAgents(ctx, cfg, spec, toolSettings)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		log.Printf("[agent] disable_tools=true for agent=%s model=%s, skipping tool assembly", spec.Kind, modelCfg.Model)
 	}
-	subAgents, err := buildConfiguredSubAgents(ctx, cfg, spec, toolSettings)
-	if err != nil {
-		return nil, err
+
+	toolsConfig := adk.ToolsConfig{}
+	if !disableTools {
+		toolsConfig = adk.ToolsConfig{
+			EmitInternalEvents: true,
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools: assembly.Tools,
+				// 当 LLM 幻觉出不存在的工具时，把错误信息以 ToolMessage 形式回传，
+				// 让 Agent 在下一轮自行修正工具名或改用其他方案，避免整次任务被 NodeRunError 中断。
+				UnknownToolsHandler: handleUnknownTool,
+			},
+		}
 	}
 
 	return newDeepAgent(ctx, &deep.Config{
@@ -169,20 +195,12 @@ func buildDeepAgent(ctx context.Context, cfg *config.Config, spec deepAgentSpec)
 		ChatModel:              chatModel,
 		Instruction:            spec.Instruction,
 		SubAgents:              subAgents,
-		WithoutWriteTodos:      spec.DisableWriteTodos || !toolSettings.Todo,
-		WithoutGeneralSubAgent: !config.GeneralSubAgentEnabled(cfg, spec.Kind),
+		WithoutWriteTodos:      disableTools || spec.DisableWriteTodos || !toolSettings.Todo,
+		WithoutGeneralSubAgent: disableTools || !config.GeneralSubAgentEnabled(cfg, spec.Kind),
 		MaxIteration:           configMaxIteration(cfg),
 		Handlers:               assembly.Handlers,
-		ToolsConfig: adk.ToolsConfig{
-			EmitInternalEvents: true,
-			ToolsNodeConfig: compose.ToolsNodeConfig{
-				Tools: assembly.Tools,
-				// 当 LLM 幻觉出不存在的工具时，把错误信息以 ToolMessage 形式回传，
-				// 让 Agent 在下一轮自行修正工具名或改用其他方案，避免整次任务被 NodeRunError 中断。
-				UnknownToolsHandler: handleUnknownTool,
-			},
-		},
-		ModelRetryConfig: modelRetryConfig(cfg, spec.ModelOutputGuard),
+		ToolsConfig:            toolsConfig,
+		ModelRetryConfig:       modelRetryConfig(cfg, spec.ModelOutputGuard),
 	})
 }
 
@@ -370,39 +388,52 @@ func buildConfiguredSubAgents(ctx context.Context, cfg *config.Config, parent de
 }
 
 func buildConfiguredSubAgent(ctx context.Context, cfg *config.Config, parent deepAgentSpec, parentTools config.ResolvedAgentToolSettings, sub config.SubAgentConfig) (adk.Agent, error) {
-	modelCfg := chatModelConfigFromResolved(config.ResolveSubAgentModel(cfg, parent.Kind, sub))
+	subResolved := config.ResolveSubAgentModel(cfg, parent.Kind, sub)
+	modelCfg := chatModelConfigFromResolved(subResolved)
 	cm, err := openai.NewChatModel(ctx, &modelCfg)
 	if err != nil {
 		return nil, fmt.Errorf("创建子 Agent 模型失败 id=%s: %w", sub.ID, err)
 	}
 	subChatModel := providercompat.Wrap(cm, modelCfg)
 	toolSettings := config.ResolveSubAgentTools(parentTools, sub.Tools)
-	assembly, err := buildChatModelAgentAssembly(ctx, cfg, chatModelAgentAssemblySpec{
-		Kind:              sub.ID,
-		ToolPolicyKind:    parent.Kind,
-		ModelCfg:          modelCfg,
-		ToolSettings:      toolSettings,
-		EnableSkills:      parent.EnableSkills,
-		ExtraToolsFactory: parent.ExtraToolsFactory,
-		IncludeCompaction: false,
-	})
-	if err != nil {
-		return nil, err
+
+	var assembly chatModelAgentAssembly
+	if !subResolved.DisableTools {
+		assembly, err = buildChatModelAgentAssembly(ctx, cfg, chatModelAgentAssemblySpec{
+			Kind:              sub.ID,
+			ToolPolicyKind:    parent.Kind,
+			ModelCfg:          modelCfg,
+			ToolSettings:      toolSettings,
+			EnableSkills:      parent.EnableSkills,
+			ExtraToolsFactory: parent.ExtraToolsFactory,
+			IncludeCompaction: false,
+		})
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		log.Printf("[agent] disable_tools=true for sub-agent=%s model=%s, skipping tool assembly", sub.ID, modelCfg.Model)
 	}
-	return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
-		Name:          sub.ID,
-		Description:   sub.Description,
-		Instruction:   buildSubAgentInstruction(parent, sub),
-		Model:         subChatModel,
-		MaxIterations: configMaxIteration(cfg),
-		Handlers:      assembly.Handlers,
-		ToolsConfig: adk.ToolsConfig{
+
+	toolsConfig := adk.ToolsConfig{}
+	if !subResolved.DisableTools {
+		toolsConfig = adk.ToolsConfig{
 			EmitInternalEvents: true,
 			ToolsNodeConfig: compose.ToolsNodeConfig{
 				Tools:               assembly.Tools,
 				UnknownToolsHandler: handleUnknownTool,
 			},
-		},
+		}
+	}
+
+	return adk.NewChatModelAgent(ctx, &adk.ChatModelAgentConfig{
+		Name:             sub.ID,
+		Description:      sub.Description,
+		Instruction:      buildSubAgentInstruction(parent, sub),
+		Model:            subChatModel,
+		MaxIterations:    configMaxIteration(cfg),
+		Handlers:         assembly.Handlers,
+		ToolsConfig:      toolsConfig,
 		ModelRetryConfig: modelRetryConfig(cfg, nil),
 	})
 }

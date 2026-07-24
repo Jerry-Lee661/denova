@@ -109,6 +109,8 @@ const settings = {
   'settings.model.profileTemperatureLabel': 'Temperature',
   'settings.model.profileTemperaturePlaceholder': 'Temperature（可空）',
   'settings.model.profileTemperatureDefaultPlaceholder': 'Temperature，空为平台默认',
+  'settings.model.disableTools': '禁用工具调用',
+  'settings.model.disableToolsHint': '本地模型（如 llama.cpp）不支持结构化 tool call 时开启，避免 PEG 解析冲突',
   'settings.model.contextWindow': '上下文长度 (Token)',
   'settings.model.contextWindow200k': '200K',
   'settings.model.contextWindow400k': '400K（默认）',

@@ -20,6 +20,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Separator } from '@/components/ui/separator'
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Switch } from '@/components/ui/switch'
 import { LOCALE_OPTIONS } from '@/i18n'
 import { APP_VERSION } from '@/app-version'
 import { markAutoUpdateChecked, notifyUpdateCheckResult, shouldRunAutoUpdateCheck } from './update-check-cache'
@@ -1321,11 +1322,20 @@ function ModelProfilesEditor({ profiles, effectiveProfiles, onChange }: {
                   className="max-w-24"
                 />
               </ModelProfileInput>
-              <ModelProfileInput label={t('settings.model.contextWindow')} className="md:col-span-5">
+              <ModelProfileInput label={t('settings.model.contextWindow')} className="md:col-span-4">
                 <ContextWindowInput
                   value={profile.context_window_tokens ?? DEFAULT_CONTEXT_WINDOW_TOKENS}
                   onChange={(value) => updateProfile(index, { context_window_tokens: value })}
                 />
+              </ModelProfileInput>
+              <ModelProfileInput label={t('settings.model.disableTools')} className="md:col-span-3">
+                <div className="flex items-center gap-2 py-1">
+                  <Switch
+                    checked={profile.disable_tools === true}
+                    onCheckedChange={(checked) => updateProfile(index, { disable_tools: checked || null })}
+                  />
+                  <span className="text-[11px] text-[var(--nova-text-muted)]">{t('settings.model.disableToolsHint')}</span>
+                </div>
               </ModelProfileInput>
             </div>
           </div>

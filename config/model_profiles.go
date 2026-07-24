@@ -15,6 +15,10 @@ type ModelProfileSettings struct {
 	OpenAIModel         string   `toml:"openai_model,omitempty" json:"openai_model,omitempty"`
 	Temperature         *float64 `toml:"temperature,omitempty" json:"temperature,omitempty"`
 	ContextWindowTokens *int     `toml:"context_window_tokens,omitempty" json:"context_window_tokens,omitempty"`
+	// DisableTools prevents the agent framework from injecting tool definitions
+	// into model requests. Use for local models (e.g. llama.cpp) whose native
+	// PEG tool-call grammar conflicts with free-form creative output.
+	DisableTools *bool `toml:"disable_tools,omitempty" json:"disable_tools,omitempty"`
 }
 
 type AgentModelSettings struct {
@@ -46,6 +50,7 @@ type ResolvedModelSettings struct {
 	ContextWindowTokens int
 	EnableThinking      *bool
 	ReasoningEffort     string
+	DisableTools        bool
 }
 
 func MergeAgentModelSettings(parent, child AgentModelSettings) AgentModelSettings {
@@ -125,6 +130,10 @@ func ResolveAgentModel(cfg *Config, agentKind string) ResolvedModelSettings {
 	if agentOverride.Temperature != nil {
 		temperature = agentOverride.Temperature
 	}
+	disableTools := false
+	if profile.DisableTools != nil {
+		disableTools = *profile.DisableTools
+	}
 	return ResolvedModelSettings{
 		ProfileID:           profileID,
 		OpenAIAPIKey:        profile.OpenAIAPIKey,
@@ -134,6 +143,7 @@ func ResolveAgentModel(cfg *Config, agentKind string) ResolvedModelSettings {
 		ContextWindowTokens: *profile.ContextWindowTokens,
 		EnableThinking:      agentOverride.EnableThinking,
 		ReasoningEffort:     normalizeReasoningEffort(agentOverride.ReasoningEffort),
+		DisableTools:        disableTools,
 	}
 }
 
@@ -224,6 +234,9 @@ func mergeModelProfile(parent, child ModelProfileSettings) ModelProfileSettings 
 	}
 	if child.ContextWindowTokens != nil {
 		out.ContextWindowTokens = child.ContextWindowTokens
+	}
+	if child.DisableTools != nil {
+		out.DisableTools = child.DisableTools
 	}
 	return out
 }

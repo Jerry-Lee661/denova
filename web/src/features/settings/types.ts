@@ -67,6 +67,7 @@ export interface ModelProfileSettings {
   openai_model?: string
   temperature?: number | null
   context_window_tokens?: number | null
+  disable_tools?: boolean | null
 }
 
 export interface ImageAPIProfileSettings {

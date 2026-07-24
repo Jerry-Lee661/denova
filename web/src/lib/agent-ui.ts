@@ -357,8 +357,13 @@ function textFingerprint(value: string) {
 
 function contentPrefixFingerprint(value: string) {
   const prefixRunes = 24
-  const runes = [...value]
-  const prefix = runes.length > prefixRunes ? runes.slice(0, prefixRunes).join('') : value
+  let prefix = ''
+  let count = 0
+  for (const rune of value) {
+    if (count >= prefixRunes) break
+    prefix += rune
+    count += 1
+  }
   return textFingerprint(prefix)
 }
 

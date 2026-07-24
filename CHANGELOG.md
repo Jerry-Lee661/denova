@@ -80,6 +80,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Game Mode now reconnects to the active Agent task for the current story and branch after a page refresh, replaying the player action, reasoning, tool calls, and streamed prose before merging the same turn on persistence confirmation.
 - Windows 新建或切换书籍时不再因工作区变更存储对 `.denova` 目录执行不受支持的同步而失败；账本、内容 blob 和作品文件仍保留完整的文件级持久化同步。
 - Creating or switching books on Windows no longer fails when workspace-change storage encounters unsupported directory synchronization under `.denova`; ledger, content blob, and manuscript files retain full file-level durability synchronization.
+- 修复 `read_file` 在无 active workspace 场景下失效的问题：`workspace` 为空时 `openWorkspaceFile` 错误地对空路径执行 `filepath.Join`，导致打开当前目录而非目标文件；现在无 workspace 时直接使用绝对路径打开。
+- Fixed `read_file` failing when no active workspace is set: `openWorkspaceFile` incorrectly called `filepath.Join` with an empty workspace, opening the current directory instead of the target file; now opens the absolute path directly when workspace is empty.
+- 修复 Task 事件批处理并发竞态：`time.AfterFunc` 回调可能在 `finish()` 关闭订阅 channel 后仍尝试发送，导致向已关闭 channel 写入引发 panic；`sendBatch` 和 `sendEvent` 现在在加锁后检查 `finished` 标志，已结束则跳过发送。
+- Fixed a race condition in Task event batching: the `time.AfterFunc` callback could attempt to send after `finish()` closed subscriber channels, causing a panic on write to a closed channel; `sendBatch` and `sendEvent` now check the `finished` flag under lock and skip sending when the task has ended.
+- 修复 `read_file` 缓存命中条件过宽的问题：缓存现在记录内容对应的窗口范围（offset/limit），命中时校验请求窗口是否完全落在缓存窗口内，避免文件超过默认行数时后续窗口读取返回截断或空内容。
+- Fixed overly broad `read_file` cache hit condition: the cache now records the window range (offset/limit) of cached content and validates that the requested window falls entirely within the cached range, preventing truncated or empty results when reading later sections of files exceeding the default line limit.
+- 优化前端 `contentPrefixFingerprint` 性能：改用 `for...of` 惰性迭代取前 24 个 rune，避免对长文本做全量 rune 展开和数组分配。
+- Improved frontend `contentPrefixFingerprint` performance: switched to lazy `for...of` iteration to extract the first 24 runes, avoiding full rune spread and array allocation on long streaming text.
+- `writing_presets_test` 依赖解析改为复用生产侧 `parseFrontmatter` + `parseDepends` 逻辑，拼接分隔符对齐为 `\n\n---\n\n`，确保测试覆盖与真实注入内容一致。
+- `writing_presets_test` dependency resolution now reuses production `parseFrontmatter` + `parseDepends` logic with the `\n\n---\n\n` join separator, ensuring test coverage matches actual injected content.
 
 ## [v0.3.0] - 2026-07-18
 

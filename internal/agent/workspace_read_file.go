@@ -123,11 +123,16 @@ func (b *agentFilesystemBackend) ReadFileSelection(ctx context.Context, req *fil
 
 	// Full-file reads (offset=1, large limit) can skip re-reading disk when
 	// the file hasn't changed since the last read.
-	if cached, ok := b.cache.get(filePath); ok {
+	if cached, ok := b.cache.get(filePath, offset, offset+limit); ok {
 		return applyFileWindow(cached, offset, limit)
 	}
 
-	file, err := openWorkspaceFile(b.workspace, rel)
+	// 无 active workspace 时 rel 为空，直接使用绝对路径打开
+	openPath := rel
+	if openPath == "" {
+		openPath = filePath
+	}
+	file, err := openWorkspaceFile(b.workspace, openPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", fmt.Errorf("file not found: %s", filePath)
@@ -142,7 +147,9 @@ func (b *agentFilesystemBackend) ReadFileSelection(ctx context.Context, req *fil
 	}
 	// Cache only full-file reads under the per-entry size threshold.
 	if offset == 1 && limit >= agentFileReadDefaultLimitLines && len(content) <= workspaceReadFileMaxSelectedBytes/2 {
-		b.cache.set(filePath, content)
+		// 记录实际读取到的行数，而非请求的 limit（文件可能不足 limit 行）
+		actualLines := strings.Count(content, "\n") + 1
+		b.cache.set(filePath, content, offset, actualLines)
 	}
 	return content, nil
 }
@@ -186,8 +193,8 @@ func openWorkspaceFile(workspace, rel string) (*os.File, error) {
 			// os.Root.Open 返回的 *os.File 独立于 root，关闭 root 不影响已打开的文件。
 			root.Close()
 		} else {
-			fullPath := filepath.Join(workspace, filepath.FromSlash(candidate))
-			f, err = os.Open(fullPath)
+			// workspace 为空时 candidate 已是绝对路径
+			f, err = os.Open(filepath.FromSlash(candidate))
 		}
 		if err == nil {
 			return f, nil

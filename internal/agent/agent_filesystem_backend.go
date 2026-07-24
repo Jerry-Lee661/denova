@@ -38,6 +38,8 @@ type fileReadCacheEntry struct {
 	size    int64
 	modTime time.Time
 	atime   time.Time
+	offset  int // 缓存内容对应的起始行（1-based）
+	limit   int // 缓存内容覆盖的行数
 }
 
 const fileReadCacheDefaultMaxBytes = 64 * 1024 * 1024 // 64 MiB
@@ -52,7 +54,8 @@ func newFileReadCache(maxBytes int64) *fileReadCache {
 	}
 }
 
-func (c *fileReadCache) get(path string) (string, bool) {
+// get 仅在请求窗口 [reqStart, reqEnd) 完全落在缓存窗口内时命中。
+func (c *fileReadCache) get(path string, reqStart, reqEnd int) (string, bool) {
 	if c == nil {
 		return "", false
 	}
@@ -73,13 +76,19 @@ func (c *fileReadCache) get(path string) (string, bool) {
 		c.mu.Unlock()
 		return "", false
 	}
+	// 校验请求窗口是否完全落在缓存窗口 [entry.offset, entry.offset+entry.limit) 内
+	cachedEnd := entry.offset + entry.limit
+	if reqStart < entry.offset || reqEnd > cachedEnd {
+		return "", false
+	}
 	c.mu.Lock()
 	entry.atime = time.Now()
 	c.mu.Unlock()
 	return entry.content, true
 }
 
-func (c *fileReadCache) set(path, content string) {
+// set 记录写入时的 offset/limit，表示缓存内容覆盖的窗口范围。
+func (c *fileReadCache) set(path, content string, offset, limit int) {
 	if c == nil {
 		return
 	}
@@ -104,6 +113,8 @@ func (c *fileReadCache) set(path, content string) {
 		size:    info.Size(),
 		modTime: info.ModTime(),
 		atime:   time.Now(),
+		offset:  offset,
+		limit:   limit,
 	}
 	c.curBytes += size
 }

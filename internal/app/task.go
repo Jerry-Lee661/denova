@@ -139,6 +139,11 @@ func shouldBatchEvent(eventType string) bool {
 // sendEvent 立即发送单个事件给所有订阅者。
 func (t *Task) sendEvent(ev agent.Event) {
 	t.mu.Lock()
+	// 任务已结束，channel 已关闭或即将关闭，不再发送
+	if t.finished {
+		t.mu.Unlock()
+		return
+	}
 	t.events = append(t.events, ev)
 	if ev.Type == "error" {
 		t.status = TaskError
@@ -169,6 +174,11 @@ func (t *Task) sendBatch(batch []agent.Event) {
 		return
 	}
 	t.mu.Lock()
+	// 任务已结束，channel 已关闭或即将关闭，不再发送
+	if t.finished {
+		t.mu.Unlock()
+		return
+	}
 	// 将批量事件追加到历史，但不逐个新增事件计数
 	t.events = append(t.events, batch...)
 	subs := make([]chan agent.Event, len(t.subs))

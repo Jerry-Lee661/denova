@@ -21,7 +21,7 @@ func TestWorkspaceReadFileToolReturnsPartialWindowWithoutRevision(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := base.(tool.InvokableTool).InvokableRun(context.Background(), `{"file_path":"`+path+`","offset":2,"limit":1}`)
+	result, err := base.(tool.InvokableTool).InvokableRun(context.Background(), `{"file_path":"`+filepath.ToSlash(path)+`","offset":2,"limit":1}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestWorkspaceReadFileToolRejectsPathOutsideWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = base.(tool.InvokableTool).InvokableRun(context.Background(), `{"file_path":"`+outside+`"}`)
+	_, err = base.(tool.InvokableTool).InvokableRun(context.Background(), `{"file_path":"`+filepath.ToSlash(outside)+`"}`)
 	if err == nil || !strings.Contains(err.Error(), "outside the active workspace") {
 		t.Fatalf("outside read should be rejected, got %v", err)
 	}
@@ -124,7 +124,7 @@ func TestWorkspaceReadFileToolBoundsOneVeryLongLine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = base.(tool.InvokableTool).InvokableRun(context.Background(), `{"file_path":"`+path+`"}`)
+	_, err = base.(tool.InvokableTool).InvokableRun(context.Background(), `{"file_path":"`+filepath.ToSlash(path)+`"}`)
 	if err == nil || !strings.Contains(err.Error(), "selected read_file window exceeds") {
 		t.Fatalf("oversized selected line should be rejected, got %v", err)
 	}

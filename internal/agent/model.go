@@ -12,6 +12,12 @@ func chatModelConfigForAgent(cfg *config.Config, agentKind string) openai.ChatMo
 	return chatModelConfigFromResolved(resolved)
 }
 
+// resolvedModelSettingsForAgent returns the full resolved model settings for
+// an agent kind, including DisableTools and other profile-level flags.
+func resolvedModelSettingsForAgent(cfg *config.Config, agentKind string) config.ResolvedModelSettings {
+	return config.ResolveAgentModel(cfg, agentKind)
+}
+
 func chatModelConfigFromResolved(resolved config.ResolvedModelSettings) openai.ChatModelConfig {
 	modelCfg := openai.ChatModelConfig{
 		APIKey:     resolved.OpenAIAPIKey,
