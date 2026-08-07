@@ -91,6 +91,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `writing_presets_test` 依赖解析改为复用生产侧 `parseFrontmatter` + `parseDepends` 逻辑，拼接分隔符对齐为 `\n\n---\n\n`，确保测试覆盖与真实注入内容一致。
 - `writing_presets_test` dependency resolution now reuses production `parseFrontmatter` + `parseDepends` logic with the `\n\n---\n\n` join separator, ensuring test coverage matches actual injected content.
 
+## [v0.3.3] - 2026-07-25
+
+### Fixed
+
+- 切换写作界面与对话框时不再强制重置输入法为半角英文；移除聊天输入框的 `inputmode`/`autocapitalize` 属性，保持与写作编辑器一致，避免焦点切换打断中文输入。
+- Switching between the Writing editor and the chat dialog no longer forces the input method back to half-width English. The chat composer's `inputmode`/`autocapitalize` attributes were removed to match the writing editor, so IME composition is no longer interrupted on focus change.
+- 打开多个 md 文件时，Ctrl+Z 撤回不再把其他标签页的文本带回当前文件；每个文件现在挂载独立的编辑器实例，拥有各自独立的撤销历史栈。
+- With multiple md files open, Ctrl+Z no longer pulls text from another tab into the current file. Each file now mounts its own editor instance with an independent undo history stack.
+
 ## [v0.3.2] - 2026-07-23
 
 ### Changed
