@@ -4,13 +4,22 @@ Denova 仅在此记录用户可感知的重大功能、重要不兼容或数据�
 
 Denova records only major user-visible features, important compatibility or data changes, security updates, and fixes affecting core workflows. Internal refactors, test changes, copy edits, and minor UI polish are omitted; see the [Git history](https://github.com/alfredxw/denova/commits/master) for full details.
 
-`Unreleased` 以最近一个已发布版本（当前为 v0.3.3）为比较基线，只描述升级用户最终可感知的净变化；内部接口、实现重构和 v0.3.3 后从未发布的中间格式不计入。
+`Unreleased` 以最近一个已发布版本（当前为 v0.4.0）为比较基线，只描述升级用户最终可感知的净变化；内部接口、实现重构和 v0.4.0 后从未发布的中间格式不计入。
 
-`Unreleased` compares against the latest release (currently v0.3.3) and describes only the final user-visible delta. Internal APIs, implementation refactors, and intermediate formats never released after v0.3.3 are excluded.
+`Unreleased` compares against the latest release (currently v0.4.0) and describes only the final user-visible delta. Internal APIs, implementation refactors, and intermediate formats never released after v0.4.0 are excluded.
 
 格式参考 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)。
 
 ## [Unreleased]
+
+### Added
+
+- **写作 Skill 守卫（第一版）**：SKILL.md frontmatter 支持 `guards` 声明（校验 `require_file`），工具运行时在匹配的写入调用执行前强制；首个守卫 `require_outline` 在大纲缺失时阻断 `chapters/` 写入，支持 block/warn 两种模式。
+- **Skill guards (first version)**: SKILL.md frontmatter supports `guards` declarations (`require_file` check) enforced by the tool runtime before matching write calls; the first guard `require_outline` blocks `chapters/` writes while the outline is missing, with block/warn modes.
+- **书籍导出新增 EPUB 与 DOCX 格式**：导出菜单在 TXT 之外提供 EPUB 3 电子书与带标题样式的 Word 文档，卷与章节层级保留。
+- **Book export gains EPUB and DOCX formats**: the export menu now offers an EPUB 3 e-book and a Word document with heading styles alongside TXT, preserving volume and chapter structure.
+- **新增写作 Skills**：`de-ai-flavor`（AI 腔检测与去味改写）、`multi-perspective-review`（读者/编辑/同类作者三视角审稿）、`style-capture`（从参考文本提取风格并存为 style_reference）。
+- **New writing Skills**: `de-ai-flavor` (detect and humanize AI-flavored prose), `multi-perspective-review` (reader/editor/peer-author critique), `style-capture` (extract a style profile into a style_reference resource).
 
 ## [v0.4.0] - 2026-09-05
 
