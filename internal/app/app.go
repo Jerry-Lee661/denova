@@ -372,6 +372,16 @@ func (a *App) Images() *imageapp.Service {
 	return a.imageApp
 }
 
+// ConfigSnapshot returns a value copy of the effective runtime configuration.
+// Handlers that only read a few settings use this instead of holding the
+// live pointer, which applyRuntime may swap under concurrent requests.
+func (a *App) ConfigSnapshot() config.Config {
+	if a.cfg == nil {
+		return config.Config{}
+	}
+	return *a.cfg
+}
+
 // TrajectoryOutcomes returns the read-only evidence feedback store owned by
 // the Agents Project Store. Profile content and feedback never share a directory.
 func (a *App) TrajectoryOutcomes() *trajectory.OutcomeStore { return a.trajectoryOutcomes }
