@@ -34,4 +34,7 @@ docs/status/*
 prd
 .playwright-cli/
 .env
-skills/ero-status/
+.env-*
+claude.md
+agent.md
+skills/ero-status/SKILL.md

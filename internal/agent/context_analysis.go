@@ -425,14 +425,13 @@ func contextAnalysisCompactionFromInteractive(compaction *interactive.ContextCom
 func buildIDEAnalysisMessages(cfg *config.Config, effectiveMessages []*schema.Message, totalMessages int, compaction *session.ContextCompaction) []*schema.Message {
 	messages := make([]*schema.Message, 0, len(effectiveMessages)+1)
 	if compaction != nil && strings.TrimSpace(compaction.Summary) != "" {
-		effectiveStart := totalMessages - len(effectiveMessages)
 		retainedTurns := compaction.RetainedTurns
 		if retainedTurns <= 0 {
 			retainedTurns = config.DefaultContextCompactionRetainedTurns
 		}
-		tail := compactedMessagesAfterSource(effectiveMessages, effectiveStart, compaction.SourceEndIndex, retainedTurns)
-		messages = append(messages, NewContextCompactionSummaryMessage(compaction.Epoch, compaction.Summary))
-		messages = append(messages, tail...)
+		// 与模型投影（compactMessagesForModel）一致：摘要 + retainTailByUserTurns(全部有效消息, retainedTurns)。
+		// IDE 分析视图需与模型可见历史折叠口径统一，避免旧投影只折叠压缩点前、新消息全保留导致 token 虚高。
+		messages = compactMessagesForModel(effectiveMessages, compaction.Summary, compaction.Epoch, retainedTurns)
 		return messages
 	}
 	for _, msg := range effectiveMessages {

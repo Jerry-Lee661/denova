@@ -113,6 +113,20 @@ export async function abortChat(): Promise<void> {
   await requestJSON('/api/chat/abort', { method: 'POST' })
 }
 
+export interface ToolExecuteResult {
+  result: string
+  error?: string
+}
+
+// executeTool 按工具名重建并同步执行单个工具，供工具卡片「重试」按钮调用。
+export async function executeTool(name: string, args: string): Promise<ToolExecuteResult> {
+  return requestJSON<ToolExecuteResult>('/api/tools/execute', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ name, args }),
+  })
+}
+
 export async function executeCommand(command: string): Promise<string> {
   const data = await requestJSON<{ result?: string }>('/api/command', {
     method: 'POST',

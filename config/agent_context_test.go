@@ -102,3 +102,25 @@ func TestResolveAgentContextUsesPerAgentOverride(t *testing.T) {
 		t.Fatalf("per-agent recent turns = %v, want 2", got)
 	}
 }
+
+func TestResolveAgentContextMemoryNotesDefaultsAndOverride(t *testing.T) {
+	if !ResolveAgentContext(&Config{}, AgentKindIDE).MemoryNotesEnabled {
+		t.Fatal("memory notes should be enabled by default")
+	}
+
+	enabled := true
+	cfg := &Config{AgentContexts: AgentContextSettings{
+		IDE: AgentContextOverride{MemoryNotesEnabled: &enabled},
+	}}
+	if got := ResolveAgentContext(cfg, AgentKindIDE).MemoryNotesEnabled; !got {
+		t.Fatalf("per-agent memory notes override should be respected, got %v", got)
+	}
+
+	disabled := false
+	cfg = &Config{AgentContexts: AgentContextSettings{
+		Default: AgentContextOverride{MemoryNotesEnabled: &disabled},
+	}}
+	if got := ResolveAgentContext(cfg, AgentKindInteractiveStory).MemoryNotesEnabled; got {
+		t.Fatalf("default memory notes disabled override should be respected, got %v", got)
+	}
+}

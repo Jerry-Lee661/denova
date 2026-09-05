@@ -40,9 +40,10 @@ func newServer(application *app.App, port string, listener net.Listener) *Server
 		host: host,
 	}
 
+	maxBody := max(handlers.MaxCharacterCardUploadBytes, handlers.ImageAnalysisMaxUploadBytes)
 	options := []hertzconfig.Option{
 		hertzserver.WithHostPorts(host + ":" + port),
-		hertzserver.WithMaxRequestBodySize(int(handlers.MaxCharacterCardUploadBytes)),
+		hertzserver.WithMaxRequestBodySize(int(maxBody)),
 	}
 	if listener != nil {
 		options = append(options, hertzserver.WithListener(listener))

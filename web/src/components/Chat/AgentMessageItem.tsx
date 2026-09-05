@@ -18,12 +18,14 @@ interface AgentMessageItemProps {
   onEditAssistantReply?: (view: AgentMessageView) => void
   onRegenerateMessage?: (view: AgentMessageView) => void
   onSwitchMessageVersion?: (view: AgentMessageView, direction: -1 | 1) => void
+  onRestoreCheckpoint?: (view: AgentMessageView) => void
   onSubmitPlanQuestion?: (ref: AgentPartRef, content: string, preview: string) => void
   onApprovePlan?: (ref: AgentPartRef) => void
   onContinuePlan?: (view: AgentMessageView) => void
   onExitPlanMode?: () => void
   onOpenTrace?: (runID: string) => void
   onPlanCardLayoutChange?: () => void
+  onRetryTool?: (view: AgentMessageView) => void
 }
 
 export const AgentMessageItem = memo(function AgentMessageItem({
@@ -40,12 +42,14 @@ export const AgentMessageItem = memo(function AgentMessageItem({
   onEditAssistantReply,
   onRegenerateMessage,
   onSwitchMessageVersion,
+  onRestoreCheckpoint,
   onSubmitPlanQuestion,
   onApprovePlan,
   onContinuePlan,
   onExitPlanMode,
   onOpenTrace,
   onPlanCardLayoutChange,
+  onRetryTool,
 }: AgentMessageItemProps) {
   const message = agentViewToRenderMessage(view)
   if (!message) return null
@@ -58,6 +62,7 @@ export const AgentMessageItem = memo(function AgentMessageItem({
       onEditAssistantReply={onEditAssistantReply ? () => onEditAssistantReply(view) : undefined}
       onRegenerate={onRegenerateMessage ? () => onRegenerateMessage(view) : undefined}
       onSwitchVersion={onSwitchMessageVersion ? (_message, direction) => onSwitchMessageVersion(view, direction) : undefined}
+      onRestoreCheckpoint={onRestoreCheckpoint ? () => onRestoreCheckpoint(view) : undefined}
       onOpenSubAgentSession={onOpenSubAgentSession ? () => onOpenSubAgentSession(view) : undefined}
       onInsertIllustration={onInsertIllustration}
       onGenerateInteractiveImage={onGenerateInteractiveImage ? () => onGenerateInteractiveImage(view) : undefined}
@@ -70,6 +75,7 @@ export const AgentMessageItem = memo(function AgentMessageItem({
       onExitPlanMode={onExitPlanMode}
       onOpenTrace={onOpenTrace}
       onPlanCardLayoutChange={onPlanCardLayoutChange}
+      onRetryTool={onRetryTool ? () => onRetryTool(view) : undefined}
     />
   )
 })

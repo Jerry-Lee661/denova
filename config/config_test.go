@@ -406,3 +406,45 @@ func TestLoadAgentIdleTimeoutEnvAllowsZero(t *testing.T) {
 		t.Fatalf("NOVA_AGENT_IDLE_TIMEOUT_SECONDS=0 should disable idle timeout, got %d", cfg.AgentIdleTimeoutSeconds)
 	}
 }
+
+func TestImageAnalysisAccessorsDefault(t *testing.T) {
+	cfg := &Config{}
+	if got := cfg.ImageAnalysisRequestTimeoutSeconds(); got != DefaultImageAnalysisRequestTimeoutSeconds {
+		t.Fatalf("request timeout default: want=%d got=%d", DefaultImageAnalysisRequestTimeoutSeconds, got)
+	}
+	if got := cfg.ImageAnalysisImageResizeMaxDim(); got != DefaultImageAnalysisImageResizeMaxDim {
+		t.Fatalf("resize max dim default: want=%d got=%d", DefaultImageAnalysisImageResizeMaxDim, got)
+	}
+	if got := cfg.ImageAnalysisImageResizeQuality(); got != DefaultImageAnalysisImageResizeQuality {
+		t.Fatalf("resize quality default: want=%d got=%d", DefaultImageAnalysisImageResizeQuality, got)
+	}
+}
+
+func TestImageAnalysisAccessorsReadUserSetting(t *testing.T) {
+	cfg := &Config{ImageAnalysis: ImageAnalysisSettings{
+		RequestTimeoutSeconds: intPtr(600),
+		ImageResizeMaxDim:     intPtr(1024),
+		ImageResizeQuality:    intPtr(70),
+	}}
+	if got := cfg.ImageAnalysisRequestTimeoutSeconds(); got != 600 {
+		t.Fatalf("request timeout override: want=600 got=%d", got)
+	}
+	if got := cfg.ImageAnalysisImageResizeMaxDim(); got != 1024 {
+		t.Fatalf("resize max dim override: want=1024 got=%d", got)
+	}
+	if got := cfg.ImageAnalysisImageResizeQuality(); got != 70 {
+		t.Fatalf("resize quality override: want=70 got=%d", got)
+	}
+}
+
+func TestMergeImageAnalysisSettingsPreservesTimeoutAndResize(t *testing.T) {
+	parent := ImageAnalysisSettings{RequestTimeoutSeconds: intPtr(360)}
+	child := ImageAnalysisSettings{ImageResizeMaxDim: intPtr(1200)}
+	merged := mergeImageAnalysisSettings(parent, child)
+	if merged.RequestTimeoutSeconds == nil || *merged.RequestTimeoutSeconds != 360 {
+		t.Fatalf("parent request timeout should be preserved: %#v", merged.RequestTimeoutSeconds)
+	}
+	if merged.ImageResizeMaxDim == nil || *merged.ImageResizeMaxDim != 1200 {
+		t.Fatalf("child resize max dim should be applied: %#v", merged.ImageResizeMaxDim)
+	}
+}

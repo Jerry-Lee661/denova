@@ -4,6 +4,11 @@ set -e
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 cd "${ROOT_DIR}"
 
+# Git Bash launched from Conda may omit the standard Windows Node.js path.
+if ! command -v node >/dev/null 2>&1 && [ -x "/c/Program Files/nodejs/node.exe" ]; then
+    export PATH="/c/Program Files/nodejs:${PATH}"
+fi
+
 OUTPUT_DIR="output"
 VERSION="${DENOVA_VERSION:-${NOVA_VERSION:-$(node -p "require('./web/package.json').version" 2>/dev/null || echo dev)}}"
 

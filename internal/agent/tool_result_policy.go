@@ -42,12 +42,32 @@ type FilteredToolResult struct {
 	Truncated      bool         `json:"truncated"`
 	Target         string       `json:"target,omitempty"`
 	IdempotencyKey string       `json:"idempotency_key"`
+	// Location 为外置结果在磁盘上的相对位置引用；预览逐字节稳定。
+	Location string `json:"location,omitempty"`
+	// Preview 为外置结果的字节有界预览，进入前缀后不再改动。
+	Preview string `json:"preview,omitempty"`
+	// Externalized 标记该结果是否已整体写盘（预览 + 位置引用）。
+	Externalized bool `json:"externalized,omitempty"`
 }
 
 const (
 	defaultToolResultMaxBytes = config.DefaultAgentToolResultLimitKB * 1024
 	toolResultMetadataHeader  = "[Denova tool result metadata]"
+	// readFileExternalizeThreshold 是 read_file 结果的外置阈值，低于通用
+	// ExternalizeThreshold（64KB），让大文件读取更激进地整体外置：模型只看到
+	// 预览 + 位置引用，需要细节时按 offset/limit 重读。
+	// 32KB ≈ 400 行（按 80 字节/行估算）——小段精读留在上下文，章节级读取外置。
+	readFileExternalizeThreshold = 32 * 1024
 )
+
+// externalizeThresholdForTool 返回指定工具的外置阈值。
+// read_file 使用更低的阈值（更激进），其余工具使用默认 ExternalizeThreshold。
+func externalizeThresholdForTool(toolName string) int {
+	if normalizeToolName(toolName) == "read_file" {
+		return readFileExternalizeThreshold
+	}
+	return ExternalizeThreshold
+}
 
 func ManifestForTool(name string) ToolManifest {
 	normalized := normalizeToolName(name)

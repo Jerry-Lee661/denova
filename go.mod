@@ -13,12 +13,13 @@ require (
 	github.com/cloudwego/hertz v0.10.5
 	github.com/eino-contrib/jsonschema v1.0.3
 	github.com/go-git/go-git/v5 v5.19.1
+	github.com/klippa-app/go-pdfium v1.19.4
 	github.com/lithammer/fuzzysearch v1.1.8
 	github.com/openai/openai-go/v3 v3.41.0
 	github.com/pelletier/go-toml/v2 v2.4.0
 	github.com/sergi/go-diff v1.4.0
 	golang.org/x/crypto v0.53.0
-	golang.org/x/text v0.39.0
+	golang.org/x/text v0.40.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -53,7 +54,6 @@ require (
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/kevinburke/ssh_config v1.6.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
-	github.com/klippa-app/go-pdfium v1.19.4 // indirect
 	github.com/mailru/easyjson v0.9.2 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/meguminnnnnnnnn/go-openai v0.1.5 // indirect
@@ -76,6 +76,7 @@ require (
 	github.com/yargevad/filepathx v1.0.0 // indirect
 	golang.org/x/arch v0.28.0 // indirect
 	golang.org/x/exp v0.0.0-20260611194520-c48552f49976 // indirect
+	golang.org/x/image v0.44.0 // indirect
 	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect

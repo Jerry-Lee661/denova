@@ -172,9 +172,7 @@ func buildDeepAgent(ctx context.Context, cfg *config.Config, spec deepAgentSpec)
 		toolsConfig = adk.ToolsConfig{
 			EmitInternalEvents: true,
 			ToolsNodeConfig: compose.ToolsNodeConfig{
-				Tools: assembly.Tools,
-				// 当 LLM 幻觉出不存在的工具时，把错误信息以 ToolMessage 形式回传，
-				// 让 Agent 在下一轮自行修正工具名或改用其他方案，避免整次任务被 NodeRunError 中断。
+				Tools:               assembly.Tools,
 				UnknownToolsHandler: handleUnknownTool,
 			},
 		}
@@ -291,13 +289,20 @@ func buildChatModelAgentAssembly(ctx context.Context, cfg *config.Config, spec c
 		agenttools.MiddlewareRegistration{
 			Name: "tool_orchestrator",
 			Build: func(context.Context, agenttools.Settings) (adk.ChatModelAgentMiddleware, error) {
+				resultStore, err := newResultStoreForWorkspace(workspace)
+				if err != nil {
+					return nil, err
+				}
 				return &toolOrchestratorMiddleware{
-					agentKind:           spec.Kind,
-					policyKind:          firstNonEmpty(spec.ToolPolicyKind, spec.Kind),
-					toolSettings:        spec.ToolSettings,
-					enforceToolSettings: true,
-					toolResultMaxBytes:  configToolResultMaxBytes(cfg),
-					executionGate:       executionGate,
+					agentKind:                 spec.Kind,
+					policyKind:                firstNonEmpty(spec.ToolPolicyKind, spec.Kind),
+					workspace:                 workspace,
+					toolSettings:              spec.ToolSettings,
+					enforceToolSettings:       true,
+					toolResultMaxBytes:        configToolResultMaxBytes(cfg),
+					toolResultBatchLimitBytes: configToolResultBatchLimitBytes(cfg),
+					executionGate:             executionGate,
+					resultStore:               resultStore,
 				}, nil
 			},
 		},
@@ -337,6 +342,28 @@ func buildChatModelAgentAssembly(ctx context.Context, cfg *config.Config, spec c
 				return nil, fmt.Errorf("创建 count_words 工具失败: %w", err)
 			}
 			return []tool.BaseTool{countTool}, nil
+		},
+	})
+	toolRegistrations = append(toolRegistrations, agenttools.ToolRegistration{
+		Name:    "list_aliases",
+		Enabled: agenttools.CapabilityAllowed(config.AgentToolFileRead),
+		Build: func(agenttools.Settings) ([]tool.BaseTool, error) {
+			aliasTool, err := newListAliasesTool(workspace)
+			if err != nil {
+				return nil, fmt.Errorf("创建 list_aliases 工具失败: %w", err)
+			}
+			return []tool.BaseTool{aliasTool}, nil
+		},
+	})
+	// 模型自主压缩工具（Plan.md §12 / T1）：compress / search_context / acp_status。
+	// 由 [agent] context_tools_enabled 开关控制，默认开启；与系统阈值压缩叠加而非互斥。
+	toolRegistrations = append(toolRegistrations, agenttools.ToolRegistration{
+		Name: "context_tools",
+		Enabled: func(agenttools.Settings) bool {
+			return config.ResolveAgentContext(cfg, spec.Kind).ContextToolsEnabled
+		},
+		Build: func(agenttools.Settings) ([]tool.BaseTool, error) {
+			return NewContextTools(cfg, spec.Kind), nil
 		},
 	})
 	assembly, err := agenttools.Build(ctx, agenttools.BuildRequest{
@@ -462,6 +489,7 @@ func buildConfiguredSubAgent(ctx context.Context, cfg *config.Config, parent dee
 		ModelRetryConfig: modelRetryConfig(cfg, nil),
 	})
 }
+
 // buildWriterSubAgent 构建叙事写手子 Agent。它使用 writerProfileID 指定的模型，
 // 强制 disable_tools（请求 body 不含 tools），无 skills、无 sub-agents、无工具，
 // 只负责产出纯叙事文本，避免本地模型的 PEG tool-call grammar 与自由文本冲突。
@@ -501,6 +529,7 @@ const writerSubAgentInstruction = `你是互动故事的叙事写手，负责产
 - 直接输出叙事正文本身，不要输出解释、元评论、Markdown 标题或代码块包裹。
 - 保持与所提供上下文一致的角色性格、说话方式、情节走向和文风。
 - 遵循指定的字数目标，保证叙事完整、自然衔接。`
+
 func modelRetryConfig(cfg *config.Config, outputGuard func(context.Context, *adk.RetryContext) *adk.RetryDecision) *adk.ModelRetryConfig {
 	retryConfig := &adk.ModelRetryConfig{
 		MaxRetries:  configModelMaxRetries(cfg),
@@ -593,8 +622,13 @@ func ideToolsFactory(cfg *config.Config) func(config.ResolvedAgentToolSettings) 
 		if err != nil {
 			return nil, err
 		}
+		imageAnalysisTools, err := newImageAnalysisTools(cfg)
+		if err != nil {
+			return nil, err
+		}
 		tools := append([]tool.BaseTool{}, loreTools...)
 		tools = append(tools, imageTools...)
+		tools = append(tools, imageAnalysisTools...)
 		return tools, nil
 	}
 }
@@ -743,12 +777,31 @@ func newFilesystemMiddleware(ctx context.Context, backend filesystem.Backend, st
 		writeToolConfig.CustomTool = writeTool
 		editToolConfig.CustomTool = editTool
 	}
+	lsDesc := `Lists files and directories in a directory.
+- path: optional. Omitted = the workspace root. Accepts an absolute path or a path relative to the workspace root (e.g. chapters, setting); relative paths never escape the workspace.
+- Use ls before read_file to discover the real directory and file names.
+
+列出目录内容。
+- path：可选，省略时列出作品根目录；支持绝对路径，或相对作品根目录的相对路径（如 chapters、setting）；相对路径不会访问作品外内容。
+- 先调用 ls 确认真实目录与文件名，再 read_file。`
+	globDesc := `Find files matching a glob pattern.
+- path: optional base directory to search; omitted = the workspace root. Accepts an absolute path or a path relative to the workspace root.
+- pattern: glob expression relative to path, e.g. "**/*.md".
+
+按 glob 模式查找文件。
+- path：可选搜索基准目录，省略时以作品根目录为基准；支持绝对路径或相对作品根目录的相对路径。
+- pattern：相对 path 的 glob 表达式，如 "**/*.md"。`
+	grepDesc := `Search file contents with ripgrep.
+- path: optional directory to search; omitted = the workspace root. Accepts an absolute path or a path relative to the workspace root.
+
+用 ripgrep 搜索文件内容。
+- path：可选搜索目录，省略时以作品根目录为基准；支持绝对路径或相对作品根目录的相对路径。`
 	mwConfig := &filesystemmw.MiddlewareConfig{
 		Backend:             backend,
-		LsToolConfig:        &filesystemmw.ToolConfig{},
+		LsToolConfig:        &filesystemmw.ToolConfig{Desc: &lsDesc},
 		ReadFileToolConfig:  readToolConfig,
-		GlobToolConfig:      &filesystemmw.ToolConfig{},
-		GrepToolConfig:      &filesystemmw.ToolConfig{},
+		GlobToolConfig:      &filesystemmw.ToolConfig{Desc: &globDesc},
+		GrepToolConfig:      &filesystemmw.ToolConfig{Desc: &grepDesc},
 		WriteFileToolConfig: writeToolConfig,
 		EditFileToolConfig:  editToolConfig,
 	}
@@ -793,9 +846,64 @@ func configToolResultMaxBytes(cfg *config.Config) int {
 	return cfg.AgentToolResultLimitKB * 1024
 }
 
+// configToolResultBatchLimitBytes 返回一条消息内工具结果总和上限（字节）。
+// 0 表示不设置聚合上限（对应 Claude Code MAX_TOOL_RESULTS_PER_MESSAGE_CHARS=0 时不限）。
+func configToolResultBatchLimitBytes(cfg *config.Config) int {
+	if cfg == nil || cfg.AgentToolResultBatchLimitKB <= 0 {
+		return 0
+	}
+	return cfg.AgentToolResultBatchLimitKB * 1024
+}
+
 // handleUnknownTool 拦截 LLM 调用未知工具的错误，把可读提示作为工具结果回传给模型，
 // 引导 Agent 在后续轮次基于该反馈自我修正（例如改用正确的工具名）。
 func handleUnknownTool(_ context.Context, name, input string) (string, error) {
 	log.Printf("[agent] LLM 调用了不存在的工具 name=%s args=%s", name, input)
 	return prompts.UnknownToolMessage(name), nil
+}
+
+// BuildToolByName 按工具名重建单个文件系统工具，供前端「重试」端点直接调用。
+// 复用与主 Agent 相同的 filesystem 中间件装配路径，保证工具行为一致。
+func BuildToolByName(ctx context.Context, cfg *config.Config, workspace, toolName string) (tool.InvokableTool, error) {
+	toolName = strings.TrimSpace(toolName)
+	if toolName == "" {
+		return nil, fmt.Errorf("工具名为空")
+	}
+	localBackend, err := localbk.NewBackend(ctx, &localbk.Config{})
+	if err != nil {
+		return nil, fmt.Errorf("创建本地文件系统后端失败: %w", err)
+	}
+	backend := newAgentFilesystemBackend(localBackend, workspace)
+	toolSettings := config.ResolveAgentTools(cfg, config.AgentKindIDE)
+	mw, err := newFilesystemMiddleware(ctx, backend, newAgentStreamingShell(workspace), toolSettings, workspace)
+	if err != nil {
+		return nil, fmt.Errorf("创建 filesystem 中间件失败: %w", err)
+	}
+	if mw == nil {
+		return nil, fmt.Errorf("filesystem 中间件未启用（工具开关未开启）")
+	}
+	_, runCtx, err := mw.BeforeAgent(ctx, &adk.ChatModelAgentContext{})
+	if err != nil {
+		return nil, fmt.Errorf("装配 filesystem 工具失败: %w", err)
+	}
+	if runCtx == nil {
+		return nil, fmt.Errorf("filesystem 工具上下文为空")
+	}
+	for _, t := range runCtx.Tools {
+		if t == nil {
+			continue
+		}
+		info, err := t.Info(ctx)
+		if err != nil {
+			continue
+		}
+		if info != nil && info.Name == toolName {
+			invokable, ok := t.(tool.InvokableTool)
+			if !ok {
+				return nil, fmt.Errorf("工具 %s 不支持同步调用", toolName)
+			}
+			return invokable, nil
+		}
+	}
+	return nil, fmt.Errorf("未找到工具 %s", toolName)
 }

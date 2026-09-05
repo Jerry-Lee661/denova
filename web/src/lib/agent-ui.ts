@@ -15,6 +15,10 @@ export interface AgentMessageMetadata {
   subagent?: boolean
   subagent_session_id?: string
   subagent_type?: string
+  model_name?: string
+  /** 该消息在原始消息数组（后端 s.messages）中的索引，仅真实消息条目有值；
+   *  截断/重试的 message_index 参数必须用它，不能用 UI 历史数组下标（含展示记录会偏移）。 */
+  message_index?: number
   sse_hidden_fields?: string[]
   sse_hidden_reason?: string
   sse_display_notice?: string

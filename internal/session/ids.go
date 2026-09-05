@@ -40,3 +40,23 @@ func newContextCompactionID() string {
 func newContextCompactionRemovalID() string {
 	return "ccr-" + strings.TrimPrefix(newSessionID(), "s-")
 }
+
+func newContextFoldID() string {
+	return "cf-" + strings.TrimPrefix(newSessionID(), "s-")
+}
+
+func newContextFoldRemovedID() string {
+	return "cfr-" + strings.TrimPrefix(newSessionID(), "s-")
+}
+
+func newRuntimeStateID() string {
+	return "rs-" + strings.TrimPrefix(newSessionID(), "s-")
+}
+
+func newMemoryNoteID() string {
+	return "mn-" + strings.TrimPrefix(newSessionID(), "s-")
+}
+
+func newCheckpointID() string {
+	return "cp-" + strings.TrimPrefix(newSessionID(), "s-")
+}

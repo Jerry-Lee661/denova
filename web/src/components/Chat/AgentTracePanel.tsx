@@ -4,6 +4,7 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { downloadAgentRunTrace, exportAgentRunTrace, getAgentRunTrace, getAgentRunTraces } from '@/lib/api'
 import type { AgentRunTrace, AgentRunTraceRecord, AgentRunTraceSummary } from '@/lib/api'
+import { formatDuration } from '@/lib/format'
 import { ContextCopyButton } from './ContextCopyButton'
 
 type TraceFilter = 'all' | 'llm' | 'tools' | 'context' | 'errors'
@@ -503,12 +504,6 @@ function formatTraceTime(value: string) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
   return date.toLocaleString()
-}
-
-function formatDuration(value: number) {
-  if (!Number.isFinite(value) || value <= 0) return '-'
-  if (value < 1000) return `${Math.round(value)}ms`
-  return `${(value / 1000).toFixed(value < 10000 ? 1 : 0)}s`
 }
 
 function formatNumber(value: number) {

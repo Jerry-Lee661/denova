@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"denova/internal/sensitive"
+
 	einoskill "github.com/cloudwego/eino/adk/middlewares/skill"
 	"gopkg.in/yaml.v3"
 )
@@ -121,23 +123,50 @@ func loadRecords(ctx context.Context, dirs []Directory) []record {
 			if !entry.IsDir() {
 				continue
 			}
-			path := filepath.Join(dir.Path, entry.Name(), SkillFileName)
-			data, readErr := os.ReadFile(path)
+			skillDir := filepath.Join(dir.Path, entry.Name())
+			data, mdPath, readErr := readSkillContent(skillDir)
 			if readErr != nil {
-				if !os.IsNotExist(readErr) {
-					log.Printf("[skills] read skill failed scope=%s path=%s err=%v", dir.Scope, path, readErr)
-				}
+				log.Printf("[skills] read skill failed scope=%s path=%s err=%v", dir.Scope, skillDir, readErr)
 				continue
 			}
-			rec, parseErr := parseRecord(ctx, dir, path, string(data))
+			if data == "" {
+				continue
+			}
+			rec, parseErr := parseRecord(ctx, dir, mdPath, data)
 			if parseErr != nil {
-				log.Printf("[skills] parse skill failed scope=%s path=%s err=%v", dir.Scope, path, parseErr)
+				log.Printf("[skills] parse skill failed scope=%s path=%s err=%v", dir.Scope, mdPath, parseErr)
 				continue
 			}
 			records = append(records, rec)
 		}
 	}
 	return records
+}
+
+// readSkillContent 从技能目录读取 SKILL.md，优先使用 .gz 压缩版本。
+// 返回内容、实际读取的文件路径和错误。
+func readSkillContent(skillDir string) (content string, path string, err error) {
+	gzPath := filepath.Join(skillDir, SkillFileName+".gz")
+	mdPath := filepath.Join(skillDir, SkillFileName)
+
+	// 优先尝试 .gz 压缩版本
+	content, err = sensitive.ReadGzFile(gzPath)
+	if err != nil {
+		return "", "", err
+	}
+	if content != "" {
+		return content, gzPath, nil
+	}
+
+	// 回退到原始 .md 文件
+	data, err := os.ReadFile(mdPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", "", nil
+		}
+		return "", "", err
+	}
+	return string(data), mdPath, nil
 }
 
 func parseRecord(ctx context.Context, dir Directory, path, data string) (record, error) {

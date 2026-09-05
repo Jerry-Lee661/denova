@@ -339,6 +339,7 @@ func (c fakeDisplayConversation) UpdateDisplayToolStatus(id, name, status string
 func (c fakeDisplayConversation) AppendDisplayEventContent(id, role, delta string) error {
 	return c.appender.AppendDisplayEventContent(id, role, delta)
 }
+func (c fakeDisplayConversation) RuntimeState() session.RuntimeState { return session.RuntimeState{} }
 
 type fakeDisplayAppender struct {
 	events []session.DisplayEvent

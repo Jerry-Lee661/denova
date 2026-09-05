@@ -403,6 +403,41 @@ type ContextCompactionRemovalEvent struct {
 	Reason          string `json:"reason,omitempty"`
 }
 
+// ContextFoldEvent records a model-visible context fold: an old turn interval
+// is replaced by a summary placeholder in the projection without a new branch
+// boundary and without deleting the raw transcript. It is mutually exclusive
+// with full compaction because both manage the same "old history projection".
+type ContextFoldEvent struct {
+	V               int    `json:"v"`
+	Type            string `json:"type"`
+	ID              string `json:"id"`
+	ParentID        string `json:"parent_id,omitempty"`
+	BranchID        string `json:"branch_id"`
+	Ts              string `json:"ts"`
+	AgentKind       string `json:"agent_kind,omitempty"`
+	Summary         string `json:"summary"`
+	SourceTurnCount int    `json:"source_turn_count"`
+	RetainedTurns   int    `json:"retained_turns"`
+	TokensBefore    int    `json:"tokens_before"`
+	TokensAfter     int    `json:"tokens_after"`
+	Reason          string `json:"reason,omitempty"`
+	Phase           string `json:"phase,omitempty"`
+}
+
+// ContextFoldRemovalEvent soft-disables the latest active fold for a branch.
+type ContextFoldRemovalEvent struct {
+	V               int    `json:"v"`
+	Type            string `json:"type"`
+	ID              string `json:"id"`
+	ParentID        string `json:"parent_id,omitempty"`
+	BranchID        string `json:"branch_id"`
+	Ts              string `json:"ts"`
+	AgentKind       string `json:"agent_kind,omitempty"`
+	FoldID          string `json:"fold_id,omitempty"`
+	SourceTurnCount int    `json:"source_turn_count"`
+	Reason          string `json:"reason,omitempty"`
+}
+
 type BranchEvent struct {
 	V        int    `json:"v"`
 	Type     string `json:"type"`
@@ -432,6 +467,8 @@ type Snapshot struct {
 	TokenUsageEvents          []TokenUsageEvent                `json:"token_usage_events,omitempty"`
 	ContextCompaction         *ContextCompactionEvent          `json:"context_compaction,omitempty"`
 	ContextCompactionRemoval  *ContextCompactionRemovalEvent   `json:"context_compaction_removal,omitempty"`
+	ContextFold               *ContextFoldEvent                `json:"context_fold,omitempty"`
+	ContextFoldRemoval        *ContextFoldRemovalEvent         `json:"context_fold_removal,omitempty"`
 	DirectorPlan              *DirectorPlan                    `json:"-"`
 	DirectorPlanStatus        *DirectorPlanStatus              `json:"director_plan_status,omitempty"`
 	State                     map[string]any                   `json:"state"`

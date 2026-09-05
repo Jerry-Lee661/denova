@@ -606,12 +606,14 @@ func (m *modelInputLoggingChatModel) Stream(ctx context.Context, input []*schema
 		}
 		return msg, nil
 	}, schema.WithErrWrapper(func(err error) error {
+		recordTTFT(m.config.BaseURL, float64(durationMilliseconds(started, firstChunk)))
 		finishLLMCallTrace(span, callID, m.agentKind, "adk", "stream", m.config.Model, 0, nil, err, map[string]any{
 			"ttft_ms": durationMilliseconds(started, firstChunk),
 		})
 		return err
 	}), schema.WithOnEOF(func() (any, error) {
 		msg, concatErr := schema.ConcatMessages(chunks)
+		recordTTFT(m.config.BaseURL, float64(durationMilliseconds(started, firstChunk)))
 		finishLLMCallTrace(span, callID, m.agentKind, "adk", "stream", m.config.Model, 0, msg, concatErr, map[string]any{
 			"ttft_ms": durationMilliseconds(started, firstChunk),
 		})

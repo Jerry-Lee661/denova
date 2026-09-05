@@ -685,6 +685,15 @@ func (c *automationConversation) Output() string {
 	return strings.TrimSpace(c.output)
 }
 
+// RuntimeState reports no runtime context for a bare automation conversation;
+// it has no durable session or tracked work site to persist for resume.
+func (c *automationConversation) RuntimeState() session.RuntimeState {
+	if c == nil {
+		return session.RuntimeState{}
+	}
+	return session.RuntimeState{}
+}
+
 type automationRunConversation struct {
 	base   *agent.SessionConversation
 	output string
@@ -742,6 +751,17 @@ func (c *automationRunConversation) Output() string {
 		return ""
 	}
 	return strings.TrimSpace(c.output)
+}
+
+// RuntimeState delegates to the wrapped base session so resume can replay the
+// automation run's work site (Plan.md M11).
+func (c *automationRunConversation) RuntimeState() session.RuntimeState {
+	if c == nil || c.base == nil {
+		return session.RuntimeState{}
+	}
+	state := c.base.RuntimeState()
+	state.Mode = "automation"
+	return state
 }
 
 // runtimeConfigForTask returns the runtime config from a snapshot, applying

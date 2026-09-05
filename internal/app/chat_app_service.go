@@ -294,6 +294,17 @@ func (s *ChatAppService) StartTaskWithError(ctx context.Context, req agent.ChatR
 				return s.consumeResolvedReviewFeedback(ctx, runtime, req)
 			}
 		}
+		// 自动检查点：run 成功完成（run_state finished/success）后在后台 goroutine 创建检查点。
+		// 拦截 emit 中的 run_state finished success 事件，避免阻塞主流程。
+		runID := runtime.sess.ID
+		autoCheckpointEmit := func(ev agent.Event) {
+			if ev.Type == "run_state" {
+				if data, ok := ev.Data.(map[string]string); ok && data["phase"] == "finished" && data["status"] == "success" {
+					go a.createAutoCheckpoint(ctx, runID)
+				}
+			}
+			emit(ev)
+		}
 		runtime.chatService.RunWithOptions(ctx, runner, conversation, runtime.bookService, req, agent.RunOptions{
 			AgentKind:          agent.AgentKindIDE,
 			TaskID:             task.ID(),
@@ -310,7 +321,7 @@ func (s *ChatAppService) StartTaskWithError(ctx context.Context, req agent.ChatR
 				versionAutoSettingsForConfig(&runtime.cfg),
 			),
 			OnUserMessageCommitted: onUserMessageCommitted,
-		}, emit)
+		}, autoCheckpointEmit)
 		log.Printf("[agent-task] run end id=%s status=%s", task.ID(), task.Status())
 	})
 
@@ -326,6 +337,31 @@ func agentIdleTimeout(cfg config.Config) time.Duration {
 		return 0
 	}
 	return time.Duration(cfg.AgentIdleTimeoutSeconds) * time.Second
+}
+
+// ExecuteTool 按工具名重建并同步执行单个工具，返回工具结果文本。
+// 供前端「重试」按钮复用与主 Agent 一致的工具装配路径。
+func (a *App) ExecuteTool(ctx context.Context, name, args string) (string, error) {
+	return a.chat().ExecuteTool(ctx, name, args)
+}
+
+func (s *ChatAppService) ExecuteTool(ctx context.Context, name, args string) (string, error) {
+	runtime, _, err := s.prepareIDEChatRuntime(ctx, agent.ChatRequest{}, false)
+	if err != nil {
+		return "", err
+	}
+	t, err := agent.BuildToolByName(ctx, &runtime.cfg, runtime.workspace, name)
+	if err != nil {
+		return "", err
+	}
+	log.Printf("[agent-tool-retry] execute tool=%s workspace=%s args_len=%d", name, runtime.workspace, len(args))
+	result, err := t.InvokableRun(ctx, args)
+	if err != nil {
+		log.Printf("[agent-tool-retry] tool=%s failed: %v", name, err)
+		return "", err
+	}
+	log.Printf("[agent-tool-retry] tool=%s ok result_len=%d", name, len(result))
+	return result, nil
 }
 
 func (a *App) AnalyzeContext(ctx context.Context, req agent.ChatRequest) (agent.ContextAnalysis, error) {

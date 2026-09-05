@@ -142,6 +142,15 @@ func (c *imageAgentConversation) PendingInterruption() *session.Interruption { r
 func (c *imageAgentConversation) ResolveInterruption(string) error           { return nil }
 func (c *imageAgentConversation) ContextSourceSummary() string               { return c.sourceSummary }
 
+// RuntimeState reports no runtime context for the image agent; it has no durable
+// session or tracked work site to persist for resume.
+func (c *imageAgentConversation) RuntimeState() session.RuntimeState {
+	if c == nil {
+		return session.RuntimeState{}
+	}
+	return session.RuntimeState{}
+}
+
 func imageAgentMessage(req ImageAgentGenerateRequest) string {
 	var sb strings.Builder
 	if skill := strings.TrimSpace(req.SkillName); skill != "" {

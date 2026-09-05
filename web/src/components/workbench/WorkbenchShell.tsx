@@ -6,7 +6,7 @@ import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useSensor, us
 import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { Group, Panel, Separator } from 'react-resizable-panels'
-import { BookOpen, Bot, Clock3, Database, History, MessageSquareText, PanelLeft, PenLine, Search, Settings, SlidersHorizontal, Sparkles } from 'lucide-react'
+import { BookOpen, Bot, Clock3, Database, History, MessageSquareText, PanelLeft, PenLine, ScanText, Search, Settings, SlidersHorizontal, Sparkles } from 'lucide-react'
 import { AnimatePresence, LayoutGroup, motion } from 'motion/react'
 import { WorkspaceLayout } from '@/components/layout/workspace-layout'
 import { WorkspaceMobileLayout, type MobileNavItem } from '@/components/layout/workspace-mobile-layout'
@@ -58,7 +58,7 @@ interface WorkbenchShellProps {
   onDismissNotice?: () => void
 }
 
-type ActivityItemId = 'writing' | 'story' | 'timeline' | 'lore' | 'teller' | 'versions' | 'books' | 'skills' | 'agents' | 'automations'
+type ActivityItemId = 'writing' | 'story' | 'timeline' | 'lore' | 'teller' | 'versions' | 'books' | 'skills' | 'agents' | 'automations' | 'image-analysis'
 type ActivityOrderScope = 'ide' | 'interactive'
 type SortableActivityItemId = `${ActivityOrderScope}:${ActivityItemId}`
 
@@ -79,7 +79,7 @@ const ACTIVITY_ORDER_STORAGE_KEYS: Record<ActivityOrderScope, string> = {
   ide: 'nova.activity.order.ide.v2',
   interactive: 'nova.activity.order.interactive.v2',
 }
-const DEFAULT_IDE_ACTIVITY_ORDER: ActivityItemId[] = ['writing', 'lore', 'teller', 'versions', 'books', 'skills', 'agents', 'automations']
+const DEFAULT_IDE_ACTIVITY_ORDER: ActivityItemId[] = ['writing', 'lore', 'teller', 'versions', 'books', 'skills', 'agents', 'automations', 'image-analysis']
 const DEFAULT_INTERACTIVE_ACTIVITY_ORDER: ActivityItemId[] = ['story', 'timeline', 'lore', 'teller', 'versions', 'books', 'skills', 'agents', 'automations']
 const ACTIVITY_BAR_WIDTH_STORAGE_KEY = 'nova.layout.activityBarWidth'
 const ACTIVITY_BAR_COLLAPSED_WIDTH = 64
@@ -204,15 +204,15 @@ export function WorkbenchShell({
   const loreVisible = rightPanel === 'lore'
   const tellerVisible = rightPanel === 'teller'
   const versionsVisible = rightPanel === 'versions'
-  const sharedMenuActive = settingsOpen || versionsVisible || mode === 'books' || mode === 'skills' || mode === 'agents' || mode === 'automations'
+  const sharedMenuActive = settingsOpen || versionsVisible || mode === 'books' || mode === 'skills' || mode === 'agents' || mode === 'automations' || mode === 'image-analysis'
   const ideModeActive = mode === 'ide' && !sharedMenuActive
   const interactiveModeActive = mode === 'interactive' && !sharedMenuActive
   const skillsActive = mode === 'skills' && !settingsOpen
   const agentsActive = mode === 'agents' && !settingsOpen
   const automationsActive = mode === 'automations' && !settingsOpen
-  const fullWorkspacePanelVisible = settingsOpen || versionsVisible || mode === 'skills' || mode === 'agents' || mode === 'automations' || (mode === 'ide' && (loreVisible || tellerVisible))
-  const modeLabel = settingsOpen ? t('workbench.mode.settings') : versionsVisible ? t('workbench.activity.versions') : mode === 'interactive' ? t('workbench.mode.interactive') : mode === 'books' ? t('workbench.mode.books') : mode === 'skills' ? t('workbench.mode.skills') : mode === 'agents' ? t('workbench.mode.agents') : mode === 'automations' ? t('workbench.mode.automations') : t('workbench.mode.ide')
-  const navigationMode = mode === 'books' || mode === 'skills' || mode === 'agents' || mode === 'automations' ? booksReturnMode : mode
+  const fullWorkspacePanelVisible = settingsOpen || versionsVisible || mode === 'skills' || mode === 'agents' || mode === 'automations' || mode === 'image-analysis' || (mode === 'ide' && (loreVisible || tellerVisible))
+  const modeLabel = settingsOpen ? t('workbench.mode.settings') : versionsVisible ? t('workbench.activity.versions') : mode === 'interactive' ? t('workbench.mode.interactive') : mode === 'books' ? t('workbench.mode.books') : mode === 'skills' ? t('workbench.mode.skills') : mode === 'agents' ? t('workbench.mode.agents') : mode === 'automations' ? t('workbench.mode.automations') : mode === 'image-analysis' ? t('imageAnalysis.title') : t('workbench.mode.ide')
+  const navigationMode = mode === 'books' || mode === 'skills' || mode === 'agents' || mode === 'automations' || mode === 'image-analysis' ? booksReturnMode : mode
   const activityOrderScope: ActivityOrderScope = navigationMode === 'interactive' ? 'interactive' : 'ide'
   const activityOrder = activityOrders[activityOrderScope]
 
@@ -306,6 +306,16 @@ export function WorkbenchShell({
     closeSettingsIfOpen()
     if (versionsVisible) onSetRightPanel(null)
     onSetMode('automations')
+  }
+
+  const openImageAnalysis = () => {
+    if (mode === 'image-analysis' && !settingsOpen) {
+      returnFromBooks()
+      return
+    }
+    closeSettingsIfOpen()
+    if (versionsVisible) onSetRightPanel(null)
+    onSetMode('image-analysis')
   }
 
   const openAutomationNotification = (target: AutomationMessageNavigation) => {
@@ -405,6 +415,13 @@ export function WorkbenchShell({
       onClick: openAutomations,
       active: automationsActive,
       icon: <ActivityIconBadge count={automationInboxUnread} running={automationRunning > 0}><Clock3 className="size-3" /></ActivityIconBadge>,
+    },
+    {
+      id: 'image-analysis',
+      label: t('imageAnalysis.title'),
+      onClick: openImageAnalysis,
+      active: mode === 'image-analysis' && !settingsOpen,
+      icon: <ScanText className="h-4 w-4" />,
     },
   ]
 

@@ -1,40 +1,62 @@
 ---
 name: image-analysis
-description: 从上传的漫画/小说页面图片中提取结构化创作内容（大纲、进度、灵感、角色状态、资料库设定）。当用户要求分析图片、从图片提取设定、识别角色或场景时使用。Extract structured creative content from uploaded manga/novel page images.
+description: 审核图片分析结果并整理入库。用户在图片分析页面完成提取后，使用本 Skill 在对话中审核提取内容（台词、角色、设定等），去重纠错后写入资料库和正式文件。Review extracted content from image analysis, de-duplicate, and persist to workspace files and lore database.
 agent: ide
 ---
 
-# 图片分析
+# 图片分析结果审核与入库
 
-当用户上传了漫画页、小说扫描页、手写大纲照片或参考素材图片，并希望从中提取创作内容时使用本 Skill。
+用户在**图片分析页面**上传图片完成分析后，提取结果会展示在页面中，同时后端会把原始 JSON 结果保存在项目目录下的 `assets/analysis/batch-{id}/result.md`。
+
+本 Skill 在 **Agent 对话**中被调用，负责审核这些结果并整理入库。
 
 ## 前置条件
 
-图片分析由后端批量管线完成（`POST /api/image-analysis/batch`），分析结果保存在 `assets/analysis/batch-{id}/result.md`。本 Skill 指导你如何消费这些已完成的分析结果。
+- 用户已在图片分析页面完成至少一个批次的图片分析
+- 后端已将结果保存到项目 `assets/analysis/batch-{id}/result.md`
+- 用户来到 Agent 对话，请求审核提取结果
 
 ## 工作流程
 
-1. 确认用户已完成图片上传和批量分析（检查 `assets/analysis/` 目录下是否有对应批次结果）。
-2. 使用 `read_file` 读取 `assets/analysis/batch-{id}/result.md` 获取聚合分析结果。
-3. 根据用户意图，将提取的内容写入对应文件：
-   - **大纲** → 使用 `write_file` 或 `edit_file` 更新 `setting/outline.md`
-   - **进度** → 使用 `edit_file` 更新 `setting/progress.md`
-   - **灵感** → 使用 `write_file` 追加到 `setting/inspiration.md`
-   - **角色状态** → 使用 `edit_file` 更新 `setting/character-states.md`
-   - **资料库** → 使用 `write_lore_items` 批量写入资料库条目
-4. 写入前先向用户展示提取结果摘要，获得确认后再执行写入。
-5. 写入完成后，使用 `read_file` 读回验证关键片段已落盘。
+### 阶段一：读取并展示
 
-## 写入规则
+1. 确认批次 ID（用户提供，或使用 `list_image_analysis_batches` 查找最近的已完成批次）。
+2. 读取 `{{PROJECT_DIR}}/assets/analysis/batch-{id}/result.md` 获取提取结果（路径前缀为 `.denova/projects/<书名>/`，用 `ls` 先确认目录结构再读取）。
+3. 在对话中按意图分组展示摘要，标注置信度：
+   - 🔴 `type: "other"` 且内容含"模糊/无法识别" → 低置信，建议丢弃
+   - 🟡 角色名用描述代替（如"黑发少年"）→ 可能是新角色，需用户命名
+   - 🟡 多页间矛盾的信息 → 需人工核对
+4. 询问用户：全部接受 / 部分保留 / 调整重新分析？
 
-- 遵循 `writing-common` 的状态文件边界规则：大纲只记录长期结构，进度只记录当前进展，资料库只记录稳定设定。
-- 从图片提取的内容可能包含不确定性，写入时应标注来源为"图片分析"。
-- 资料库条目的 `brief_description` 以"类型 名称。"开头，`content` 使用中文 Markdown。
-- 不要编造图片中不存在的内容；如果分析结果中有"其他"类型条目说明图片模糊，应告知用户。
+### 阶段二：写入文件（用户确认后）
+
+5. 按用户确认范围写入：
+   - **台词脚本** → `write_file` 写入 `script/dialogue.md`（按页整理，标注页码和角色）
+   - **大纲线索** → `write_file` 写入 `setting/outline-from-images.md`（与正式大纲隔离）
+   - **进度线索** → `edit_file` 追加到 `setting/progress.md`
+   - **灵感碎片** → `write_file` 追加到 `setting/inspiration.md`
+   - **角色状态快照** → `edit_file` 更新 `setting/character-states.md`
+
+### 阶段三：整理入库（可选，用户提出时执行）
+
+6. 从提取内容中识别长期稳定设定，去重后 `write_lore_items` 批量入库。
+7. 不使用 `lore-init`（那是交互式从零创建），这里已有具体内容，直接写。
+8. 如需结构化大纲，可建议调用 `outline` skill 整合碎片线索。
+
+## 与其他 Skill 的关系
+
+| 场景 | 在哪操作 | 用什么 |
+|------|----------|--------|
+| 上传图片、启动分析、看进度 | **图片分析页面**（UI 面板） | 不需要 skill |
+| 审核提取结果、去重纠错 | **Agent 对话** | 本 skill |
+| 将审核后的设定写入资料库 | **Agent 对话** | 本 skill → `write_lore_items` |
+| 把碎片线索整理为正式大纲 | **Agent 对话** | `outline` skill |
+| 从零讨论新建资料库 | **Agent 对话** | `lore-init` skill |
 
 ## 注意事项
 
-- 分析结果中的页码顺序已按文件名自然排序处理，不需要重新排序。
-- 如果批次状态为 `partial`（部分失败），告知用户哪些页面分析失败，建议重试。
-- 不要一次性将所有提取内容全部写入；先展示摘要，让用户选择要保留的部分。
-- 图片分析是辅助参考，最终写入内容需要用户确认。
+- 本 skill **不负责上传图片和启动分析**——那是图片分析页面（UI）的事。
+- 本 skill 的入口是**已有分析结果文件**，用户在对话中说"帮我审核一下刚才的分析结果"。
+- OCR 和模型分析存在误差，必须展示摘要等用户确认后才写入。
+- `setting/outline-from-images.md` 是临时线索，不覆盖正式 `setting/outline.md`。
+- 对话气泡文字保留汉化组原文，不做改写。

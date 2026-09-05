@@ -14,6 +14,8 @@ const (
 	StoryEventTypeHotChoices        = "hot_choices"
 	StoryEventTypeCompaction        = "context_compaction"
 	StoryEventTypeCompactionRemoved = "context_compaction_removed"
+	StoryEventTypeFold              = "context_fold"
+	StoryEventTypeFoldRemoved       = "context_fold_removed"
 
 	stateOpSchemaVersion = 2
 )
@@ -74,6 +76,12 @@ func mapToStoryEventRecord(raw map[string]any) (StoryEventRecord, error) {
 			return StoryEventRecord{}, fmt.Errorf("校验状态变化事件失败: %w", err)
 		}
 	}
+	if envelope.Type == StoryEventTypeFold {
+		var fold ContextFoldEvent
+		if err := mapToStruct(raw, &fold); err != nil {
+			return StoryEventRecord{}, err
+		}
+	}
 	return StoryEventRecord{Envelope: envelope, Raw: raw}, nil
 }
 
@@ -104,6 +112,11 @@ func storyEventRecordForWrite(event any) (StoryEventRecord, error) {
 		}
 		if err := validateStateDeltaForWrite(StateDelta{SchemaVersion: delta.SchemaVersion, Ops: delta.Ops, ActorOps: delta.ActorOps}); err != nil {
 			return StoryEventRecord{}, fmt.Errorf("校验待写入状态变化事件失败: %w", err)
+		}
+	case StoryEventTypeFold:
+		var fold ContextFoldEvent
+		if err := mapToStruct(record.Raw, &fold); err != nil {
+			return StoryEventRecord{}, err
 		}
 	}
 	return record, nil
@@ -169,7 +182,7 @@ func validateStoryEventEnvelope(envelope StoryEventEnvelope) error {
 		return fmt.Errorf("故事事件 schema 版本不支持: %d", envelope.V)
 	}
 	switch envelope.Type {
-	case StoryEventTypeTurn, StoryEventTypeStateDelta, StoryEventTypeBranch, StoryEventTypeHotChoices, StoryEventTypeCompaction, StoryEventTypeCompactionRemoved:
+	case StoryEventTypeTurn, StoryEventTypeStateDelta, StoryEventTypeBranch, StoryEventTypeHotChoices, StoryEventTypeCompaction, StoryEventTypeCompactionRemoved, StoryEventTypeFold, StoryEventTypeFoldRemoved:
 	default:
 		return fmt.Errorf("未知故事事件类型: %q", envelope.Type)
 	}

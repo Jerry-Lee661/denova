@@ -37,6 +37,7 @@ import automations from './zh-CN/automations'
 import messages from './zh-CN/messages'
 import onboarding from './zh-CN/onboarding'
 import changes from './zh-CN/changes'
+import imageAnalysis from './zh-CN/imageAnalysis'
 
 const zhCN = {
   ...common,
@@ -78,6 +79,7 @@ const zhCN = {
   ...messages,
   ...onboarding,
   ...changes,
+  ...imageAnalysis,
 } as const
 
 export default zhCN

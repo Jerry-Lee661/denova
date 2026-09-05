@@ -722,6 +722,10 @@ func (a *App) RemoveInteractiveContextCompaction(storyID, branchID string) (bool
 	return a.interactiveService().RemoveInteractiveContextCompaction(storyID, branchID)
 }
 
+func (a *App) RemoveInteractiveContextFold(storyID, branchID string) (bool, error) {
+	return a.interactiveService().RemoveInteractiveContextFold(storyID, branchID)
+}
+
 func (s *InteractiveAppService) RemoveInteractiveContextCompaction(storyID, branchID string) (bool, error) {
 	store := s.store()
 	if store == nil {
@@ -738,6 +742,99 @@ func (s *InteractiveAppService) RemoveInteractiveContextCompaction(storyID, bran
 		AgentKind:       config.AgentKindInteractiveStory,
 		CompactionID:    storyCtx.Snapshot.ContextCompaction.ID,
 		SourceTurnCount: storyCtx.Snapshot.ContextCompaction.SourceTurnCount,
+		Reason:          "user_removed",
+	})
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// FoldInteractiveContext folds the incremental source (turns after the last
+// compaction/fold) into a summary placeholder and persists a fold event. It is
+// mutually exclusive with full compaction.
+func (a *App) FoldInteractiveContext(ctx context.Context, storyID, branchID string) (agent.ContextFoldResult, error) {
+	return a.interactiveService().FoldInteractiveContext(ctx, storyID, branchID)
+}
+
+// foldAllowed reports whether a fold may run for this story snapshot. Fold and
+// full compaction manage the same "old history projection", so an active
+// compaction takes precedence and the fold is skipped to avoid overlap.
+func (s *InteractiveAppService) foldAllowed(storyCtx interactive.StoryContext) bool {
+	if storyCtx.Snapshot.ContextCompaction != nil && strings.TrimSpace(storyCtx.Snapshot.ContextCompaction.Summary) != "" {
+		return false
+	}
+	return true
+}
+
+func (s *InteractiveAppService) FoldInteractiveContext(ctx context.Context, storyID, branchID string) (agent.ContextFoldResult, error) {
+	store, runtimeCfg, workspace, err := s.interactiveRuntimeConfig()
+	if err != nil {
+		return agent.ContextFoldResult{}, err
+	}
+	storyCtx, err := store.StoryContext(storyID, branchID)
+	if err != nil {
+		return agent.ContextFoldResult{}, err
+	}
+	if !s.foldAllowed(storyCtx) {
+		return agent.ContextFoldResult{SkippedReason: "compaction_active"}, nil
+	}
+	sourceStart := 0
+	if compaction := storyCtx.Snapshot.ContextCompaction; compaction != nil && compaction.SourceTurnCount > sourceStart {
+		sourceStart = compaction.SourceTurnCount
+	}
+	if fold := storyCtx.Snapshot.ContextFold; fold != nil && fold.SourceTurnCount > sourceStart {
+		sourceStart = fold.SourceTurnCount
+	}
+	if sourceStart > len(storyCtx.Snapshot.Turns) {
+		sourceStart = len(storyCtx.Snapshot.Turns)
+	}
+	_, result, err := agent.AgentFoldContext(ctx, &runtimeCfg, config.AgentKindInteractiveStory, agent.ContextCompactionInput{
+		Messages:         interactiveCompactionTurnMessages(storyCtx.Snapshot.Turns),
+		Phase:            "manual",
+		Force:            true,
+		ReferenceContext: "",
+	}, sourceStart, len(storyCtx.Snapshot.Turns), "manual")
+	if err != nil {
+		return result, err
+	}
+	if !result.Triggered {
+		return result, fmt.Errorf("没有可折叠的互动上下文")
+	}
+	event := interactive.ContextFoldEvent{
+		AgentKind:       config.AgentKindInteractiveStory,
+		Summary:         result.Summary,
+		SourceTurnCount: sourceStart,
+		RetainedTurns:   result.RetainedTurns,
+		TokensBefore:    result.TokensBefore,
+		TokensAfter:     result.TokensAfter,
+		Reason:          "context_usage_threshold",
+		Phase:           result.Phase,
+	}
+	event, err = store.AppendContextFold(storyID, storyCtx.Snapshot.BranchID, event)
+	if err != nil {
+		return result, err
+	}
+	log.Printf("[interactive-agent] manual context fold completed workspace=%s story_id=%s branch_id=%s source_turns=%d tokens_before=%d tokens_after=%d", workspace, storyID, storyCtx.Snapshot.BranchID, sourceStart, result.TokensBefore, result.TokensAfter)
+	return result, nil
+}
+
+func (s *InteractiveAppService) RemoveInteractiveContextFold(storyID, branchID string) (bool, error) {
+	store := s.store()
+	if store == nil {
+		return false, ErrNoWorkspace
+	}
+	storyCtx, err := store.StoryContext(storyID, branchID)
+	if err != nil {
+		return false, err
+	}
+	if storyCtx.Snapshot.ContextFold == nil {
+		return false, nil
+	}
+	_, err = store.AppendContextFoldRemoval(storyID, storyCtx.Snapshot.BranchID, interactive.ContextFoldRemovalEvent{
+		AgentKind:       config.AgentKindInteractiveStory,
+		FoldID:          storyCtx.Snapshot.ContextFold.ID,
+		SourceTurnCount: storyCtx.Snapshot.ContextFold.SourceTurnCount,
 		Reason:          "user_removed",
 	})
 	if err != nil {

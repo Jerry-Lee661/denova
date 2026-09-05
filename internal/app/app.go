@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/cloudwego/eino/adk"
 
 	"denova/config"
 	"denova/internal/agent"
 	"denova/internal/book"
+	"denova/internal/imageanalysis"
 	"denova/internal/interactive"
 	"denova/internal/session"
 )
@@ -190,6 +192,15 @@ func (a *App) applyRuntime(runtime *runtimeState) {
 	a.interactiveStoryRunner = runtime.interactiveStoryRunner
 	a.versionService = runtime.versionService
 	a.workspaceDirectorTasks = newWorkspaceDirectorTaskGroup()
+
+	// Recover any image analysis batches left in "running"/"pending" state
+	// from a previous crash — mark them as failed so the UI doesn't get stuck.
+	imageanalysis.NewStore(runtime.workspace).RecoverStaleBatches()
+
+	// 惰性清扫超过保留期的批次图片（启动时机；下次触发在新建批次时）。
+	if n := imageanalysis.NewStore(runtime.workspace).SweepExpiredUploads(time.Duration(a.cfg.ImageAnalysisImageRetentionMinutes()) * time.Minute); n > 0 {
+		log.Printf("[image-analysis] swept %d expired batch(es) on startup", n)
+	}
 }
 
 func (a *App) clearRuntime() {

@@ -35,6 +35,9 @@ func (c *failingAssistantConversation) MarkInterrupted(string, string, string) e
 }
 func (c *failingAssistantConversation) PendingInterruption() *session.Interruption { return nil }
 func (c *failingAssistantConversation) ResolveInterruption(string) error           { return nil }
+func (c *failingAssistantConversation) RuntimeState() session.RuntimeState {
+	return session.RuntimeState{}
+}
 
 func TestDisplayRecorderKeepsWriteFileContentArgs(t *testing.T) {
 	appender := &displayRecorderTestAppender{}

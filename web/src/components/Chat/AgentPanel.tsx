@@ -7,11 +7,13 @@ import { createStablePortalHost, StablePortalSlot } from '@/components/layout/st
 import type { ImagePreset, Teller } from '@/features/interactive/types'
 import { removeChatContextCompaction } from '@/lib/api'
 import type { ChapterIllustration, ChapterSummary, ContextAnalysis, IDEContext, SessionSummary, TextSelection } from '@/lib/api'
+import type { Checkpoint } from '@/lib/api-client/types'
 import type { AgentUIMessage } from '@/lib/agent-ui'
 import { agentSubAgentSessionKey, agentViewContent, buildAgentMessageViews, selectAgentTokenUsageRecords, type AgentMessageView, type AgentPartRef } from '@/lib/agent-message-view'
 import { useSkillCommands } from '@/hooks/useSkillCommands'
 import { DEFAULT_WRITING_SKILL, useWritingSkillOptions } from '@/hooks/useWritingSkillOptions'
 import type { PersistedUserSettingsController } from '@/hooks/usePersistedUserSettings'
+import { ConfirmDialog } from '@/components/common/ConfirmDialog'
 import { AgentChatPane } from './AgentChatPane'
 import { SessionManagementPanel } from './SessionManagementPanel'
 import { AgentTracePanel } from './AgentTracePanel'
@@ -46,6 +48,7 @@ interface AgentPanelProps {
   tellers: Teller[]
   imagePresets?: ImagePreset[]
   messages: AgentUIMessage[]
+  checkpoints: Checkpoint[]
   sessions: SessionSummary[]
   activeSessionId: string
   isStreaming: boolean
@@ -88,6 +91,10 @@ interface AgentPanelProps {
   onReviewFeedbackSubmissionFailed?: (feedback: ReviewFeedbackBatch) => void
   onOpenChangeReview?: (reviewThreadID: string, groupID: string) => void
   onWorkspaceChanged?: (paths: string[]) => void | Promise<void>
+  onRegenerateMessage?: (view: AgentMessageView) => void
+  onStartEditTurn?: (view: AgentMessageView) => Promise<string | null>
+  onRetryTool?: (view: AgentMessageView) => void
+  onRestoreCheckpoint?: (checkpointId: string) => void
   onClose: () => void
   onSubAgentDetailsChange?: (open: boolean) => void
 }
@@ -101,6 +108,7 @@ export function AgentPanel({
   tellers,
   imagePresets = [],
   messages,
+  checkpoints,
   sessions,
   activeSessionId,
   isStreaming,
@@ -143,6 +151,10 @@ export function AgentPanel({
   onReviewFeedbackSubmissionFailed,
   onOpenChangeReview,
   onWorkspaceChanged,
+  onRegenerateMessage,
+  onStartEditTurn,
+  onRetryTool,
+  onRestoreCheckpoint,
   onClose,
   onSubAgentDetailsChange,
 }: AgentPanelProps) {
@@ -150,6 +162,8 @@ export function AgentPanel({
   const [view, setView] = useState<AgentPanelView>('chat')
   const [inputPrefill, setInputPrefill] = useState<{ prompt: string; nonce: number } | null>(null)
   const [contextAnalysisOpen, setContextAnalysisOpen] = useState(false)
+  // 待确认还原的检查点：点击"还原检查点"后先弹二次确认，确认后才执行还原。
+  const [pendingRestoreCheckpoint, setPendingRestoreCheckpoint] = useState<Checkpoint | null>(null)
   const [contextAnalysisLoading, setContextAnalysisLoading] = useState(false)
   const [contextAnalysisError, setContextAnalysisError] = useState<string | null>(null)
   const [contextAnalysis, setContextAnalysis] = useState<ContextAnalysis | null>(null)
@@ -340,6 +354,34 @@ export function AgentPanel({
     onContinuePlan: continuePlanDiscussion,
     onExitPlanMode,
     onOpenTrace: openTraceRun,
+    onRegenerateMessage,
+    // 编辑过往消息（Copilot 式）：截断到该轮源 user 消息后，把原文预填进 composer，
+    // 用户修改后手动发送即完成「编辑并重试」。user 与 assistant 消息的编辑按钮共用该入口。
+    onEditMessage: onStartEditTurn
+      ? (view: AgentMessageView) => {
+          void onStartEditTurn(view).then((prefill) => {
+            if (prefill) setInputPrefill((current) => ({ prompt: prefill, nonce: (current?.nonce || 0) + 1 }))
+          })
+        }
+      : undefined,
+    onEditAssistantReply: onStartEditTurn
+      ? (view: AgentMessageView) => {
+          void onStartEditTurn(view).then((prefill) => {
+            if (prefill) setInputPrefill((current) => ({ prompt: prefill, nonce: (current?.nonce || 0) + 1 }))
+          })
+        }
+      : undefined,
+    onRetryTool,
+    onRestoreCheckpoint: onRestoreCheckpoint
+      ? (view: AgentMessageView) => {
+          const sourceIndex = messages.findIndex((message) => message.id === view.messageId)
+          const checkpoint = sourceIndex >= 0
+            ? checkpoints.find((item) => item.message_index === sourceIndex)
+            : undefined
+          // 二次确认：先弹确认弹窗，用户确认后才真正执行还原（见下方 ConfirmDialog）。
+          if (checkpoint) setPendingRestoreCheckpoint(checkpoint)
+        }
+      : undefined,
   }
   const inputAreaProps = {
     onSend: sendWithWritingSkill,
@@ -512,6 +554,20 @@ export function AgentPanel({
             analysis={contextAnalysis}
             onOpenChange={setContextAnalysisOpen}
             onRemoveCompaction={removeContextCompaction}
+          />
+          <ConfirmDialog
+            open={pendingRestoreCheckpoint !== null}
+            onOpenChange={(open) => { if (!open) setPendingRestoreCheckpoint(null) }}
+            title={t('chat.checkpoint.restoreConfirm.title')}
+            description={t('chat.checkpoint.restoreConfirm.description')}
+            confirmLabel={t('chat.checkpoint.restoreConfirm.confirm')}
+            tone="danger"
+            onConfirm={async () => {
+              if (!pendingRestoreCheckpoint) return
+              const id = pendingRestoreCheckpoint.id
+              setPendingRestoreCheckpoint(null)
+              await onRestoreCheckpoint?.(id)
+            }}
           />
         </>
       ) : view === 'sessions' ? (

@@ -169,6 +169,125 @@ func (b *agentFilesystemBackend) Read(ctx context.Context, req *filesystem.ReadR
 	return b.Backend.Read(ctx, &next)
 }
 
+// LsInfo / GlobInfo / GrepRaw 覆盖 eino 默认实现：它们接收真实绝对路径，但默认
+// 实现既不校验相对路径也不校验 workspace 边界，且空路径会回退到磁盘根（ls/glob）
+// 或进程工作目录（grep），可能让 Agent 看到 workspace 之外的内容。这里统一改为
+// 走 resolveAgentToolPath 校验，空路径默认落到 workspace 根。
+
+func (b *agentFilesystemBackend) LsInfo(ctx context.Context, req *filesystem.LsInfoRequest) ([]filesystem.FileInfo, error) {
+	if req == nil {
+		return nil, fmt.Errorf("ls request is nil")
+	}
+	if b == nil || b.Backend == nil {
+		return nil, fmt.Errorf("filesystem backend is nil")
+	}
+	next := *req
+	path, err := resolveAgentToolPathOrWorkspaceRoot(b.workspace, next.Path)
+	if err != nil {
+		return nil, err
+	}
+	next.Path = path
+	// 目标路径不存在时返回显式错误（触发 path_resolution_failed 恢复提示），
+	// 而不是让底层 ls 静默返回空——静默空会让模型误以为是"空目录"而无法分辨
+	// 路径写错，进而陷入反复猜测绝对路径。
+	if _, statErr := os.Stat(path); statErr != nil {
+		return nil, fmt.Errorf("file not found: %s", path)
+	}
+	return b.Backend.LsInfo(ctx, &next)
+}
+
+func (b *agentFilesystemBackend) GlobInfo(ctx context.Context, req *filesystem.GlobInfoRequest) ([]filesystem.FileInfo, error) {
+	if req == nil {
+		return nil, fmt.Errorf("glob request is nil")
+	}
+	if b == nil || b.Backend == nil {
+		return nil, fmt.Errorf("filesystem backend is nil")
+	}
+	next := *req
+	path, err := resolveAgentToolPathOrWorkspaceRoot(b.workspace, next.Path)
+	if err != nil {
+		return nil, err
+	}
+	next.Path = path
+	// 与 ls 一致：搜索根路径不存在时返回显式错误（触发恢复提示），
+	// 避免底层 glob 直接返回 "failed to walk directory" 这种无引导的错误。
+	if _, statErr := os.Stat(path); statErr != nil {
+		return nil, fmt.Errorf("file not found: %s", path)
+	}
+	return b.Backend.GlobInfo(ctx, &next)
+}
+
+func (b *agentFilesystemBackend) GrepRaw(ctx context.Context, req *filesystem.GrepRequest) ([]filesystem.GrepMatch, error) {
+	if req == nil {
+		return nil, fmt.Errorf("grep request is nil")
+	}
+	if b == nil || b.Backend == nil {
+		return nil, fmt.Errorf("filesystem backend is nil")
+	}
+	next := *req
+	path, err := resolveAgentToolPathOrWorkspaceRoot(b.workspace, next.Path)
+	if err != nil {
+		return nil, err
+	}
+	// 与 read_file 同样的路径容错：模型传的 path 可能被截断（ch00001 → 缺 -正文）
+	// 或 URL 编码。解析后目标不存在时，尝试候选变体与父目录唯一前缀回退。
+	next.Path = resolveGrepPathWithFallback(b.workspace, next.Path, path)
+	return b.Backend.GrepRaw(ctx, &next)
+}
+
+// resolveGrepPathWithFallback 在 grep 的解析路径不存在时尝试容错：
+// 1) URL 解码 / 破折号折叠候选（复用 read_file 的 workspaceFilePathCandidates）；
+// 2) 父目录文件名前缀唯一回退（复用 readFileUniquePrefixFallback，只匹配文件）。
+// 都不命中时返回原始绝对路径，让底层暴露真实的"路径不存在"。
+func resolveGrepPathWithFallback(workspace, input, absolute string) string {
+	if _, err := os.Stat(absolute); err == nil {
+		return absolute
+	}
+	for _, candidate := range workspaceFilePathCandidates(input) {
+		if candidate == input {
+			continue
+		}
+		if abs, _, err := resolveAgentToolPath(workspace, candidate); err == nil {
+			if _, statErr := os.Stat(abs); statErr == nil {
+				return abs
+			}
+		}
+	}
+	if workspace != "" {
+		if _, relative, err := resolveAgentToolPath(workspace, input); err == nil {
+			if fb := readFileUniquePrefixFallback(workspace, relative); fb != "" {
+				if abs, _, err := resolveAgentToolPath(workspace, fb); err == nil {
+					return abs
+				}
+			}
+		}
+	}
+	return absolute
+}
+
+// resolveAgentToolPathOrWorkspaceRoot 在路径为空且存在 active workspace 时回退到
+// workspace 根（避免 ls/glob/grep 的空路径落到磁盘根或进程工作目录）；否则走
+// resolveAgentToolPath 统一校验。空路径 + 无 workspace 时原样透传，保持该场景的
+// 既有行为。
+func resolveAgentToolPathOrWorkspaceRoot(workspace, input string) (string, error) {
+	if strings.TrimSpace(input) == "" {
+		workspace = strings.TrimSpace(workspace)
+		if workspace == "" {
+			return "", nil
+		}
+		absolute, err := filepath.Abs(workspace)
+		if err != nil {
+			return "", err
+		}
+		return filepath.Clean(absolute), nil
+	}
+	absolute, _, err := resolveAgentToolPath(workspace, input)
+	if err != nil {
+		return "", err
+	}
+	return absolute, nil
+}
+
 func (b *agentFilesystemBackend) Edit(ctx context.Context, req *filesystem.EditRequest) error {
 	if req == nil {
 		return fmt.Errorf("edit request is nil")

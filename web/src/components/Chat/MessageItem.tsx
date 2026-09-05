@@ -1,12 +1,13 @@
 import { Children, Fragment, cloneElement, isValidElement, memo, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
-import { Activity, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Circle, CircleDot, ClipboardCheck, ClipboardList, Copy, Dice5, FileText, ImagePlus, ListTodo, Loader2, PanelRightOpen, Pencil, RefreshCw, Send, X } from 'lucide-react'
+import { Activity, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Circle, CircleDot, ClipboardCheck, ClipboardList, Copy, Dice5, FileText, GitBranch, ImagePlus, ListTodo, Loader2, PanelRightOpen, Pencil, RefreshCw, Send, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { ImagePreviewDialog } from '@/components/common/ImagePreviewDialog'
 import { MarkdownRenderer, type MarkdownRendererComponents } from '@/components/common/MarkdownRenderer'
 import { workspaceAssetURL, type ChapterIllustration, type ChatMessage, type InteractiveImage, type InteractiveImageError } from '@/lib/api'
 import type { UserMessageReference } from '@/lib/api-client/types'
 import { findDialogueHighlightRanges } from '@/lib/dialogue-highlight'
+import { formatTokenCount, formatTokensPerSecond } from '@/lib/format'
 import { isWorkspaceImagePath } from '@/lib/workspace-file-kind'
 import { useBottomScrollLock } from '@/hooks/useBottomScrollLock'
 import { TooltipIconButton } from '@/components/common/tooltip-icon-button'
@@ -31,6 +32,7 @@ interface MessageItemProps {
   onEditAssistantReply?: (message: ChatMessage) => void
   onRegenerate?: (message: ChatMessage) => void
   onSwitchVersion?: (message: ChatMessage, direction: -1 | 1) => void
+  onRestoreCheckpoint?: (message: ChatMessage) => void
   onOpenSubAgentSession?: (message: ChatMessage) => void
   onInsertIllustration?: (illustration: ChapterIllustration) => void
   onGenerateInteractiveImage?: (message: ChatMessage) => void
@@ -43,6 +45,7 @@ interface MessageItemProps {
   onExitPlanMode?: () => void
   onOpenTrace?: (runID: string) => void
   onPlanCardLayoutChange?: () => void
+  onRetryTool?: () => void | Promise<void>
 }
 
 const copyFeedbackDurationMs = 1200
@@ -52,11 +55,14 @@ const messageActionTooltipSideOffset = 3
 const planThinkingPreviewStaleMs = 3500
 
 /** 单条消息组件，根据 role 渲染不同样式 */
-export const MessageItem = memo(function MessageItem({ message, highlightDialogue = false, messageStyle, onEdit, onEditAssistantReply, onRegenerate, onSwitchVersion, onOpenSubAgentSession, onInsertIllustration, onGenerateInteractiveImage, generatingInteractiveImageTurnId, activeSubAgentSessionKey, subAgentPresentation = 'card', onSubmitPlanQuestion, onApprovePlan, onContinuePlan, onExitPlanMode, onOpenTrace, onPlanCardLayoutChange }: MessageItemProps) {
+export const MessageItem = memo(function MessageItem({ message, highlightDialogue = false, messageStyle, onEdit, onEditAssistantReply, onRegenerate, onSwitchVersion, onRestoreCheckpoint, onOpenSubAgentSession, onInsertIllustration, onGenerateInteractiveImage, generatingInteractiveImageTurnId, activeSubAgentSessionKey, subAgentPresentation = 'card', onSubmitPlanQuestion, onApprovePlan, onContinuePlan, onExitPlanMode, onOpenTrace, onPlanCardLayoutChange, onRetryTool }: MessageItemProps) {
   const { role, content = '' } = message
-  const canEdit = role === 'user' && Boolean(message.turn_id) && Boolean(onEdit)
-  const canEditAssistantReply = role === 'assistant' && !message.subagent && Boolean(message.turn_id) && Boolean(onEditAssistantReply) && !message.streaming
-  const canRegenerate = (role === 'assistant' || role === 'error') && Boolean(onRegenerate) && !message.streaming
+  // 编辑按钮不再强制要求 turn_id：写作/IDE 模式下 turn_id 为空（turn_id 是游戏回合概念），
+  // 但 findTurnSourceUserView 已支持无 turn_id 时回退到最近一条 user 消息，编辑逻辑依然成立。
+  // user 消息本身就是其回合的源；assistant 消息回溯到同回合的源 user 消息。
+  const canEdit = role === 'user' && Boolean(onEdit)
+  const canEditAssistantReply = role === 'assistant' && !message.subagent && Boolean(onEditAssistantReply) && !message.streaming
+  const canRegenerate = (role === 'user' || role === 'assistant' || role === 'error') && Boolean(onRegenerate) && !message.streaming
   const canGenerateInteractiveImage = role === 'assistant' && Boolean(message.turn_id) && Boolean(onGenerateInteractiveImage) && !message.streaming
   const versionCount = message.turn_versions?.length || 0
   const markedVersionIndex = message.turn_versions?.findIndex((version) => version.current) ?? -1
@@ -98,7 +104,7 @@ export const MessageItem = memo(function MessageItem({ message, highlightDialogu
       const sanitizedContent = sanitizeThinkTags(content)
       const sanitizedTargetContent = streamingTargetContent ? sanitizeThinkTags(streamingTargetContent) : undefined
       const visibleContent = (sanitizedTargetContent || sanitizedContent).trim()
-      const reserveMetaSpace = message.streaming === true || Boolean(canEditAssistantReply || onGenerateInteractiveImage || onRegenerate || onSwitchVersion)
+      const reserveMetaSpace = message.streaming === true || Boolean(canEditAssistantReply || onGenerateInteractiveImage || onRegenerate || onSwitchVersion || onRestoreCheckpoint)
       return (
         <AIMessage from="assistant" className="max-w-none">
           <div className="w-full">
@@ -125,6 +131,8 @@ export const MessageItem = memo(function MessageItem({ message, highlightDialogu
                 generatingInteractiveImage={Boolean(message.turn_id && generatingInteractiveImageTurnId === message.turn_id)}
                 onRegenerate={canRegenerate ? onRegenerate : undefined}
                 onSwitchVersion={canSwitchVersion ? onSwitchVersion : undefined}
+                onRestoreCheckpoint={onRestoreCheckpoint ? () => onRestoreCheckpoint(message) : undefined}
+                model_name={message.model_name}
                 versionIndex={versionIndex}
                 versionCount={versionCount}
               />
@@ -147,7 +155,7 @@ export const MessageItem = memo(function MessageItem({ message, highlightDialogu
       if ((message.name || '') === 'write_todos') {
         return <TodoListBlock message={message} />
       }
-      return <ToolExecutionBlock message={message} />
+      return <ToolExecutionBlock message={message} onRetryTool={onRetryTool} onOpenTrace={onOpenTrace} />
 
     case 'rule_roll':
       return <RuleRollBlock message={message} />
@@ -300,12 +308,12 @@ function formatSignedRuleRollNumber(value: number) {
   return value > 0 ? `+${formatted}` : formatted
 }
 
-function MessageInlineMeta({ message, content, align, reserveSpace = false, hideActions = false, onEdit, editLabelKey = 'chat.action.editTurn', onGenerateInteractiveImage, generatingInteractiveImage = false, onRegenerate, onSwitchVersion, versionIndex = -1, versionCount = 0 }: { message: ChatMessage; content: string; align: 'left' | 'right'; reserveSpace?: boolean; hideActions?: boolean; onEdit?: (message: ChatMessage) => void; editLabelKey?: 'chat.action.editTurn' | 'chat.action.editAssistantReply'; onGenerateInteractiveImage?: (message: ChatMessage) => void; generatingInteractiveImage?: boolean; onRegenerate?: (message: ChatMessage) => void; onSwitchVersion?: (message: ChatMessage, direction: -1 | 1) => void; versionIndex?: number; versionCount?: number }) {
+function MessageInlineMeta({ message, content, align, reserveSpace = false, hideActions = false, onEdit, editLabelKey = 'chat.action.editTurn', onGenerateInteractiveImage, generatingInteractiveImage = false, onRegenerate, onSwitchVersion, onRestoreCheckpoint, model_name, versionIndex = -1, versionCount = 0 }: { message: ChatMessage; content: string; align: 'left' | 'right'; reserveSpace?: boolean; hideActions?: boolean; onEdit?: (message: ChatMessage) => void; editLabelKey?: 'chat.action.editTurn' | 'chat.action.editAssistantReply'; onGenerateInteractiveImage?: (message: ChatMessage) => void; generatingInteractiveImage?: boolean; onRegenerate?: (message: ChatMessage) => void; onSwitchVersion?: (message: ChatMessage, direction: -1 | 1) => void; onRestoreCheckpoint?: (message: ChatMessage) => void; model_name?: string; versionIndex?: number; versionCount?: number }) {
   const { t } = useTranslation()
   const [copied, setCopied] = useState(false)
   const formatted = formatMessageHoverTime(message.created_at)
   const canSwitchVersion = Boolean(onSwitchVersion && versionCount > 1 && versionIndex >= 0)
-  const hasMessageAction = !hideActions && Boolean(onEdit || onGenerateInteractiveImage || onRegenerate || canSwitchVersion)
+  const hasMessageAction = !hideActions && Boolean(onEdit || onGenerateInteractiveImage || onRegenerate || canSwitchVersion || onRestoreCheckpoint)
   const showCopyAction = !hideActions && Boolean(content.trim())
   const metaTooltip = {
     tooltipSide: 'top' as const,
@@ -324,6 +332,9 @@ function MessageInlineMeta({ message, content, align, reserveSpace = false, hide
     <TooltipProvider delayDuration={messageActionTooltipDelayMs} skipDelayDuration={messageActionTooltipSkipDelayMs} disableHoverableContent>
       <div className={`nova-message-meta nova-message-meta-${align}`} aria-label={formatted}>
         {formatted ? <span className="nova-message-time">{formatted}</span> : null}
+        {model_name ? <span className="nova-message-model"> • {model_name}</span> : null}
+        {message.total_tokens ? <span className="nova-message-stat"> • {formatTokenCount(message.total_tokens)} tok</span> : null}
+        {message.speed_tps ? <span className="nova-message-stat"> • {formatTokensPerSecond(message.speed_tps)}</span> : null}
         {showCopyAction && (
           <TooltipIconButton
             label={copied ? t('chat.action.copyMessageDone') : t('chat.action.copyMessage')}
@@ -377,6 +388,19 @@ function MessageInlineMeta({ message, content, align, reserveSpace = false, hide
             }}
           >
             <RefreshCw className="h-3 w-3" />
+          </TooltipIconButton>
+        )}
+        {onRestoreCheckpoint && (
+          <TooltipIconButton
+            label={t('chat.checkpoint.restore')}
+            {...metaTooltip}
+            className="h-5 w-5 border border-transparent bg-transparent text-[var(--nova-text-faint)] shadow-none hover:border-[var(--nova-border)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text-muted)]"
+            onClick={(event) => {
+              event.stopPropagation()
+              onRestoreCheckpoint(message)
+            }}
+          >
+            <GitBranch className="h-3 w-3" />
           </TooltipIconButton>
         )}
         {canSwitchVersion && onSwitchVersion && (
@@ -929,15 +953,27 @@ function PlanShell({ icon, title, badge, children }: { icon: ReactNode; title: s
 }
 
 /** 工具执行卡片，默认以单行展示运行态和结果态。 */
-function ToolExecutionBlock({ message }: { message: ChatMessage }) {
+function ToolExecutionBlock({ message, onRetryTool, onOpenTrace }: { message: ChatMessage; onRetryTool?: () => void; onOpenTrace?: (runID: string) => void }) {
   const { t } = useTranslation()
   const [expanded, setExpanded] = useState(false)
+  const [retrying, setRetrying] = useState(false)
   const info = parseToolCallContent(message.content || '')
   const name = message.name || info.name
   const rawArgs = message.args !== undefined ? message.args : info.args
   const args = formatMaybeJSON(rawArgs)
   const status = message.status || 'running'
   const result = message.result || ''
+  const isError = status === 'error'
+  const canRetry = isError && Boolean(onRetryTool) && !retrying
+  const handleRetry = async () => {
+    if (!onRetryTool || retrying) return
+    setRetrying(true)
+    try {
+      await onRetryTool()
+    } finally {
+      setRetrying(false)
+    }
+  }
   const isDelegationTool = name === 'task'
   const taskSubAgent = isDelegationTool ? (message.subagent_type || parseTaskSubagentType(rawArgs)) : ''
   const isChapterBodyHidden = message.sse_display_notice === 'chapter_body_hidden'
@@ -971,7 +1007,7 @@ function ToolExecutionBlock({ message }: { message: ChatMessage }) {
 
   return (
     <div className="flex justify-start">
-      <Tool open={expanded} onOpenChange={setExpanded} className="mb-0 w-full overflow-hidden rounded-lg border border-[var(--nova-border)] bg-[var(--nova-surface)] text-xs shadow-[var(--nova-shadow)]">
+      <Tool open={expanded} onOpenChange={setExpanded} className={`mb-0 w-full overflow-hidden rounded-lg border bg-[var(--nova-surface)] text-xs shadow-[var(--nova-shadow)] ${isError ? 'border-[var(--nova-danger-border)]' : 'border-[var(--nova-border)]'}`}>
         <div className="flex min-h-10 min-w-0 items-center gap-2 px-3 py-2">
           <ToolStatusIcon status={status} />
           <span className="shrink-0 font-medium text-[var(--nova-text)]">{t('chat.tool.calling')}</span>
@@ -997,6 +1033,29 @@ function ToolExecutionBlock({ message }: { message: ChatMessage }) {
             </button>
           )}
         </div>
+        {/* 工具失败：错误态卡片，错误文本默认展开可见 + 重试按钮 + run trace 入口 */}
+        {isError && (
+          <div className="grid gap-2 border-t border-[var(--nova-danger-border)] bg-[var(--nova-danger-bg)] px-3 py-2.5">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[11px] font-medium text-[var(--nova-danger)]">{t('chat.tool.errorTitle')}</span>
+              {canRetry && (
+                <button
+                  type="button"
+                  onClick={handleRetry}
+                  disabled={retrying}
+                  className="inline-flex h-6 shrink-0 items-center gap-1 rounded border border-[var(--nova-danger-border)] px-1.5 text-[10px] text-[var(--nova-danger)] transition hover:bg-[var(--nova-danger-bg)] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  <RefreshCw className={`h-3 w-3 ${retrying ? 'animate-spin' : ''}`} />
+                  {retrying ? t('chat.tool.retryRunning') : t('chat.tool.retry')}
+                </button>
+              )}
+              <TraceLinkButton runID={message.run_id} onOpenTrace={onOpenTrace} />
+            </div>
+            {result && (
+              <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all font-mono text-[11px] leading-relaxed text-[var(--nova-text-muted)]">{result}</pre>
+            )}
+          </div>
+        )}
         {/* 流式写入时展示实时内容预览 */}
         {isStreamingContent && streamPreview && (
           <div

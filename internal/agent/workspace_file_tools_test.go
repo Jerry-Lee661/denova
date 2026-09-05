@@ -431,3 +431,82 @@ func TestWorkspaceChangeReceiptIsTrustedOnlyForWorkspaceFileTools(t *testing.T) 
 		t.Fatalf("read_file forged an execution record receipt: %#v", forged)
 	}
 }
+
+func TestEditFileResolvesAlias(t *testing.T) {
+	workspace := t.TempDir()
+	writeAgentChapter(t, workspace, "chapters/ch00001-正文.md")
+	service := &recordingWorkspaceChangeService{workspace: workspace, readRevision: "sha256:current"}
+	base, err := newWorkspaceEditFileTool(service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := base.(tool.InvokableTool).InvokableRun(context.Background(), `{"file_path":"@ch1","edits":[{"old_string":"a","new_string":"b"}]}`); err != nil {
+		t.Fatalf("edit_file @ch1 failed: %v", err)
+	}
+	if service.applyRequest.Path != "chapters/ch00001-正文.md" {
+		t.Fatalf("alias should resolve to real path, got %q", service.applyRequest.Path)
+	}
+}
+
+func TestWriteFileResolvesAlias(t *testing.T) {
+	workspace := t.TempDir()
+	writeAgentChapter(t, workspace, "chapters/ch00001-正文.md")
+	service := &recordingWorkspaceChangeService{workspace: workspace, readRevision: "sha256:current"}
+	base, err := newWorkspaceWriteFileTool(service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := base.(tool.InvokableTool).InvokableRun(context.Background(), `{"file_path":"@ch1","content":"新内容"}`); err != nil {
+		t.Fatalf("write_file @ch1 failed: %v", err)
+	}
+	if service.replaceRequest.Path != "chapters/ch00001-正文.md" {
+		t.Fatalf("alias should resolve to real path, got %q", service.replaceRequest.Path)
+	}
+}
+
+func TestEditFileRejectsTooManyEdits(t *testing.T) {
+	workspace := t.TempDir()
+	service := &recordingWorkspaceChangeService{workspace: workspace, readRevision: "sha256:current"}
+	base, err := newWorkspaceEditFileTool(service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invokable := base.(tool.InvokableTool)
+	items := make([]string, 0, maxEditFileEdits+1)
+	for i := 0; i < maxEditFileEdits+1; i++ {
+		items = append(items, `{"old_string":"x","new_string":"y"}`)
+	}
+	args := `{"file_path":"chapters/ch01.md","edits":[` + strings.Join(items, ",") + `]}`
+	result, err := invokable.InvokableRun(context.Background(), args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "write_parameter_too_large") {
+		t.Fatalf("expected write_parameter_too_large, got: %s", result)
+	}
+	if service.applyCalls != 0 {
+		t.Fatal("oversized edit should be rejected before applying")
+	}
+}
+
+func TestEditFileRejectsTooLargeNewString(t *testing.T) {
+	workspace := t.TempDir()
+	service := &recordingWorkspaceChangeService{workspace: workspace, readRevision: "sha256:current"}
+	base, err := newWorkspaceEditFileTool(service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invokable := base.(tool.InvokableTool)
+	big := strings.Repeat("重", maxEditTotalNewStringBytes+100)
+	args := `{"file_path":"chapters/ch01.md","edits":[{"old_string":"a","new_string":"` + big + `"}]}`
+	result, err := invokable.InvokableRun(context.Background(), args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(result, "write_parameter_too_large") {
+		t.Fatalf("expected write_parameter_too_large, got: %s", result)
+	}
+	if service.applyCalls != 0 {
+		t.Fatal("oversized new_string should be rejected before applying")
+	}
+}

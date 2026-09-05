@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/cloudwego/eino/schema"
 
+	"denova/config"
 	"denova/internal/book"
 	"denova/internal/session"
 )
@@ -240,5 +242,110 @@ func mustWriteTestFile(t *testing.T, workspace, relPath, content string) {
 	}
 	if err := os.WriteFile(absPath, []byte(content), 0o644); err != nil {
 		t.Fatalf("写入测试文件失败: %v", err)
+	}
+}
+
+func TestPhysicalToolSafetyWindowScalesDownClampedWindow(t *testing.T) {
+	cases := []struct {
+		advertised int
+		want       int
+	}{
+		{1_000_000, int(float64(toolModeHardWindowCapTokens) * toolModePhysicalSafetyRatio)}, // 宣称 1M → 81920×0.85
+		{toolModeHardWindowCapTokens, int(float64(toolModeHardWindowCapTokens) * toolModePhysicalSafetyRatio)},
+		{65536, 55705}, // 配置对齐到 64k → ×0.85
+		{16384, 13926}, // 小窗口 16k 也按比例收敛
+		{0, 0},
+		{-1, 0},
+	}
+	for _, c := range cases {
+		got := physicalToolSafetyWindow(c.advertised)
+		if got != c.want {
+			t.Fatalf("physicalToolSafetyWindow(%d) = %d, want %d", c.advertised, got, c.want)
+		}
+		if got > clampToolWindowTokens(c.advertised) {
+			t.Fatalf("physical window %d must not exceed clamped window %d", got, clampToolWindowTokens(c.advertised))
+		}
+	}
+}
+
+func TestResolvedToolSafeWindow(t *testing.T) {
+	// 显式配置优先（可超过内置 81920，供云端强模型一次注入大文件）。
+	explicit := config.ResolvedModelSettings{ToolSafeWindowTokens: 200000, ContextWindowTokens: 1_000_000}
+	if got := resolvedToolSafeWindow(explicit); got != 200000 {
+		t.Fatalf("explicit tool safe window = %d, want 200000", got)
+	}
+	// 未配置：不启用额外工具安全闸门，交给模型自身 ctx 配置判定。
+	heuristic := config.ResolvedModelSettings{ContextWindowTokens: 1_000_000}
+	if got := resolvedToolSafeWindow(heuristic); got != 0 {
+		t.Fatalf("unconfigured tool safe window = %d, want 0", got)
+	}
+	// 小窗口模型同样不启用隐式工具安全闸门。
+	small := config.ResolvedModelSettings{ContextWindowTokens: 16384}
+	if got := resolvedToolSafeWindow(small); got != 0 {
+		t.Fatalf("small unconfigured tool safe window = %d, want 0", got)
+	}
+}
+
+func TestToolSafeBudgetGuardUsesExplicitWindowOnly(t *testing.T) {
+	model := config.ResolvedModelSettings{ContextWindowTokens: 1_000_000}
+	if got := resolvedToolSafeWindow(model); got != 0 {
+		t.Fatalf("resolved fallback window = %d, want no implicit large-model guard", got)
+	}
+	if model.ToolSafeWindowTokens > 0 {
+		t.Fatal("test model unexpectedly has an explicit tool-safe window")
+	}
+}
+
+func TestIsModelMemoryError(t *testing.T) {
+	positive := []string{
+		"got exception: bad allocation",
+		"std::bad_alloc",
+		"out of memory: failed to allocate",
+		"allocation failed: not enough memory",
+		"resource exhausted: KV cache",
+		"llama-server memory error",
+	}
+	for _, msg := range positive {
+		if !isModelMemoryError(fmt.Errorf("%s", msg)) {
+			t.Fatalf("should detect memory error: %q", msg)
+		}
+	}
+	negative := []string{
+		"failed to parse tool call arguments as json",
+		"file not found: chapters/ch01.md",
+		"connection refused",
+	}
+	for _, msg := range negative {
+		if isModelMemoryError(fmt.Errorf("%s", msg)) {
+			t.Fatalf("should NOT detect as memory error: %q", msg)
+		}
+	}
+}
+
+func TestIsServerRejectionError(t *testing.T) {
+	positive := []string{
+		"context length exceeded",
+		"Context length exceeded, please reduce the length of your messages.",
+		"maximum context length exceeded",
+		"prompt too long",
+		"too many tokens in context",
+		"exceeds maximum context length",
+	}
+	for _, msg := range positive {
+		if !isServerRejectionError(fmt.Errorf("%s", msg)) {
+			t.Fatalf("should detect server rejection: %q", msg)
+		}
+	}
+	negative := []string{
+		"connection refused",
+		"timeout awaiting headers",
+		"bad allocation",
+		"failed to parse tool call arguments as json",
+		"",
+	}
+	for _, msg := range negative {
+		if isServerRejectionError(fmt.Errorf("%s", msg)) {
+			t.Fatalf("should NOT detect server rejection: %q", msg)
+		}
 	}
 }

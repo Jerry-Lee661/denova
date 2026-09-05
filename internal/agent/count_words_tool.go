@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"unicode"
@@ -67,15 +68,36 @@ func newCountWordsTool(workspaces ...string) (tool.BaseTool, error) {
 		var content string
 		var source string
 		if hasFile {
-			absolute, _, err := resolveWorkspaceReadPath(workspace, input.FilePath)
+			absolute, relative, err := resolveWorkspaceReadPath(workspace, input.FilePath)
 			if err != nil {
 				return "", err
 			}
-			data, readErr := readFileContentForCount(absolute)
+			// 与 read_file 复用同一套打开容错链（URL 解码、破折号折叠、文件名前缀唯一回退），
+			// 避免模型把路径传成带编码/丢字符的变体时 count_words 直接失败而 read_file 却能成功。
+			openPath := relative
+			if openPath == "" {
+				openPath = absolute
+			}
+			file, openErr := openWorkspaceFile(workspace, openPath)
+			if openErr != nil {
+				if os.IsNotExist(openErr) {
+					return "", fmt.Errorf("file not found: %s", absolute)
+				}
+				return "", fmt.Errorf("failed to open file for count_words: %w", openErr)
+			}
+			if info, statErr := file.Stat(); statErr == nil && info.IsDir() {
+				file.Close()
+				return "", fmt.Errorf(
+					"%s is a directory, not a file: use ls to list its contents（%s 是目录而非文件，请用 ls 列出其内容）",
+					absolute, absolute,
+				)
+			}
+			data, readErr := io.ReadAll(file)
+			file.Close()
 			if readErr != nil {
 				return "", fmt.Errorf("read file for count_words: %w", readErr)
 			}
-			content = data
+			content = string(data)
 			source = absolute
 		} else {
 			content = input.Text
@@ -162,13 +184,4 @@ func isCJKRune(r rune) bool {
 		(r >= 0x2B820 && r <= 0x2CEAF) || // CJK Extension E
 		(r >= 0x2CEB0 && r <= 0x2EBEF) || // CJK Extension F
 		(r >= 0x30000 && r <= 0x3134F) // CJK Extension G
-}
-
-// readFileContentForCount reads a file's full content for counting.
-func readFileContentForCount(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", err
-	}
-	return string(data), nil
 }

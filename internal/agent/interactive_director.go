@@ -221,6 +221,15 @@ func (c *singleInstructionConversation) ResolveInterruption(string) error {
 	return nil
 }
 
+// RuntimeState reports no runtime context for a single-instruction conversation;
+// it has no durable session or tracked work site to persist for resume.
+func (c *singleInstructionConversation) RuntimeState() session.RuntimeState {
+	if c == nil {
+		return session.RuntimeState{}
+	}
+	return session.RuntimeState{}
+}
+
 func (c *singleInstructionConversation) AppendDisplayEvent(event session.DisplayEvent) error {
 	if c == nil {
 		return nil

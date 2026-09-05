@@ -203,6 +203,33 @@ describe('MessageItem', () => {
     expect(screen.getByRole('button', { name: '复制消息' })).toBeInTheDocument()
   })
 
+  it('写作模式（无 turn_id）user 与 assistant 消息仍显示编辑按钮', async () => {
+    const user = userEvent.setup()
+    const handleEdit = vi.fn()
+    const handleEditAssistant = vi.fn()
+    render(
+      <MessageItem
+        message={{ role: 'user', content: '故事一共进行了多少天？' }}
+        onEdit={handleEdit}
+      />,
+    )
+    // 无 turn_id 的 user 消息也应显示「编辑这轮输入」
+    expect(screen.getByRole('button', { name: '编辑这轮输入' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '编辑这轮输入' }))
+    expect(handleEdit).toHaveBeenCalledWith(expect.objectContaining({ role: 'user', content: '故事一共进行了多少天？' }))
+
+    render(
+      <MessageItem
+        message={{ role: 'assistant', content: '故事共进行了 7 天。' }}
+        onEditAssistantReply={handleEditAssistant}
+      />,
+    )
+    // 无 turn_id 的 assistant 消息也应显示「编辑 AI 回复」
+    expect(screen.getByRole('button', { name: '编辑 AI 回复' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '编辑 AI 回复' }))
+    expect(handleEditAssistant).toHaveBeenCalledWith(expect.objectContaining({ role: 'assistant', content: '故事共进行了 7 天。' }))
+  })
+
   it('游戏模式 assistant 消息高亮常见对白引号', () => {
     const { container } = render(
       <MessageItem
@@ -315,6 +342,38 @@ describe('MessageItem', () => {
     expect(screen.getByText('调用工具')).toBeInTheDocument()
     expect(screen.getByText('write_file')).toBeInTheDocument()
     expect(screen.getByText('写入完成')).toBeInTheDocument()
+  })
+
+  it('工具失败展示错误态卡片：错误标题、错误详情、重试按钮与运行轨迹入口（T4）', async () => {
+    const user = userEvent.setup()
+    const onRetryTool = vi.fn()
+    const onOpenTrace = vi.fn()
+
+    render(
+      <MessageItem
+        message={{
+          id: 'tool-error-1',
+          role: 'tool_call',
+          content: 'read_file\n{"file_path":"chapters/does-not-exist.md"}',
+          name: 'read_file',
+          args: '{"file_path":"chapters/does-not-exist.md"}',
+          status: 'error',
+          result: 'path is outside the active workspace',
+          run_id: 'run-1',
+        }}
+        onRetryTool={onRetryTool}
+        onOpenTrace={onOpenTrace}
+      />,
+    )
+
+    // 错误态区块：双语错误标题 + 错误详情（默认展开可见）+ 重试按钮 + 运行轨迹入口
+    expect(screen.getByText('工具执行失败')).toBeInTheDocument()
+    expect(screen.getByText('path is outside the active workspace')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '重试' })).toBeInTheDocument()
+    expect(screen.getByText('查看追踪')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '重试' }))
+    expect(onRetryTool).toHaveBeenCalledTimes(1)
   })
 
   it('批量 edit_file 显示改动数量且不流式展开 new_string', () => {

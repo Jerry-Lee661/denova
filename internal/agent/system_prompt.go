@@ -117,7 +117,15 @@ func outputProtocolForAgent(agentKind string) string {
 func agentRuntimeContract(agentKind string) string {
 	switch agentKind {
 	case config.AgentKindIDE:
-		return "- 写作 Agent 必须遵守文件工具安全边界和作品工作区边界；书籍内容规则仍以 CREATOR.md 和用户本轮明确要求为准。"
+		return strings.Join([]string{
+			"- 写作 Agent 必须遵守文件工具安全边界和作品工作区边界；书籍内容规则仍以 CREATOR.md 和用户本轮明确要求为准。",
+			"- 文件工具调用必须走稳定链路：先用 ls 确认目录，再用 ls/glob 获取真实文件名，最后用 read_file 读取；禁止手写或猜测绝对路径。",
+			"- 路径参数优先使用 @ 文件别名（如 @progress、@ch1；先用 list_aliases 查看可用别名），避免复制长混合中英文路径；@ 别名是后端解析的短稳定主键。",
+			"- 路径参数其次优先使用相对作品根目录的相对路径（如 chapters/ch00001.md），或直接复用 ls/glob 返回的真实路径；确需绝对路径时从作品根目录拼接，不要凭记忆改写。",
+			"- 路径参数必须锚定到上一条成功工具结果的 target；若 target 不可用，先回到已知 workspace 根重新 ls，不得在错误路径上连续改拼写重试。",
+			"- 当出现 file not found / outside workspace / must be absolute / failed to walk directory 时，先执行一次路径重定位（ls 父目录 -> ls 子目录），仍失败则停止工具循环并向用户请求确认路径。",
+			"- 需要做设定一致性验证时，先 list_lore_items（keywords + detail=index）定位候选，再 read_lore_items 读取条目正文；输出结论时必须标注引用条目的 ID/名称，不得凭记忆补设定。",
+		}, "\n")
 	case config.AgentKindInteractiveStory:
 		return strings.Join([]string{
 			"- 互动叙事 Agent 可以使用只读文件工具读取 system prompt 明确给出的共享文风参考；禁止修改 workspace 文件，禁止输出或调用写文件、删除文件、任务计划等工具。",
@@ -171,6 +179,12 @@ func agentRuntimeContract(agentKind string) string {
 			"- 上下文压缩 Agent 是 model-only 摘要 Agent，不得读取或写入 workspace，不得调用文件、命令、资料库、Skills 或 todo 工具。",
 			"- 上下文压缩 Agent 只能根据调用方提供的有界对话源和参考上下文生成摘要；不得引入外部事实或补全未提供的信息。",
 			"- 上下文压缩 Agent 不得保留 thinking、工具卡片噪音或展示用日志；但必须保留用户消息的核心意图和顺序。",
+		}, "\n")
+	case config.AgentKindImageAnalysis:
+		return strings.Join([]string{
+			"- 图片分析 Agent 只能对调用方提供的页面图片/PDF 做阅读顺序检测、分镜枚举与结构化提取，不得修改 workspace 文件或资料库。",
+			"- 图片分析 Agent 的提取结果按批次落盘，输出需标注来源文件名与分镜编号，不得凭记忆补全未提供的画面内容。",
+			"- 图片分析 Agent 可复用已注入的 PDF 阅读顺序检测结果，横排文本信任原生顺序，仅竖排日文做右→左、上→下校验。",
 		}, "\n")
 	default:
 		return fmt.Sprintf("- 当前 Agent 类型为 %s；必须遵守该 Agent 调用点的输出协议和后端校验。", strings.TrimSpace(agentKind))

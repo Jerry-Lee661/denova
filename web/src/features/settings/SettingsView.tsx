@@ -360,6 +360,10 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
 			   placeholder={placeholderFor('agent_tool_result_limit_kb')}
 			   min={1}
                onChange={(v) => setField('agent_tool_result_limit_kb', v)} />
+          <Num label={t('settings.agent.toolResultBatchLimitKB')} value={draft.agent_tool_result_batch_limit_kb ?? null}
+               placeholder={placeholderFor('agent_tool_result_batch_limit_kb')}
+               min={0}
+               onChange={(v) => setField('agent_tool_result_batch_limit_kb', v)} />
           <BoolTri label={t('settings.agent.planModeDefault')} value={draft.plan_mode_default ?? null}
                    effective={effective.plan_mode_default}
                    onChange={(v) => setField('plan_mode_default', v)} />
@@ -1321,6 +1325,15 @@ function ModelProfilesEditor({ profiles, effectiveProfiles, onChange }: {
                     onCheckedChange={(checked) => updateProfile(index, { disable_tools: checked || null })}
                   />
                   <span className="text-[11px] text-[var(--nova-text-muted)]">{t('settings.model.disableToolsHint')}</span>
+                </div>
+              </ModelProfileInput>
+              <ModelProfileInput label={t('settings.model.defaultForImageAnalysis')} className="md:col-span-3">
+                <div className="flex items-center gap-2 py-1">
+                  <Switch
+                    checked={profile.default_for_image_analysis === true}
+                    onCheckedChange={(checked) => updateProfile(index, { default_for_image_analysis: checked || null })}
+                  />
+                  <span className="text-[11px] text-[var(--nova-text-muted)]">{t('settings.model.defaultForImageAnalysisHint')}</span>
                 </div>
               </ModelProfileInput>
             </div>

@@ -1,5 +1,4 @@
 import { fetchAPI, requestJSON } from './client'
-import type { SSEEvent } from './types'
 
 // --- Types ---
 
@@ -42,6 +41,8 @@ export interface BatchState {
   current_page: number
   total_pages: number
   model_id?: string
+  /** 原始上传图片已删除（保留期清扫或手动清理）；重试/重新提取不可用 */
+  images_deleted?: boolean
 }
 
 export interface BatchResult {
@@ -51,6 +52,7 @@ export interface BatchResult {
   success_count: number
   failed_count: number
   sections: Partial<Record<AnalysisIntent, string>>
+  fact_stream?: string // 按页序拼接的完整事实流，供跨页整合模型使用
   failed_pages?: PageResult[]
 }
 
@@ -64,12 +66,31 @@ export interface ProgressEvent {
   error?: string
 }
 
+export interface ModelProfileOption {
+  id: string
+  name: string
+  model: string
+  default_for_image_analysis: boolean
+}
+
 // --- API functions ---
+
+/** Fetch available model profiles for image analysis. */
+export function getImageAnalysisModels(): Promise<ModelProfileOption[]> {
+  return requestJSON('/api/image-analysis/models')
+}
+
+/** Fetch recent batch states for panel state restoration after refresh. */
+export function getRecentImageAnalysisBatches(limit = 10): Promise<BatchState[]> {
+  return requestJSON(`/api/image-analysis/batches/recent?limit=${limit}`)
+}
 
 /** Submit a batch of images for analysis. */
 export async function createImageAnalysisBatch(
   files: File[],
   intents: AnalysisIntent[] = [],
+  modelId?: string,
+  pageRange?: { start?: number; end?: number },
 ): Promise<BatchState> {
   const form = new FormData()
   for (const file of files) {
@@ -77,6 +98,16 @@ export async function createImageAnalysisBatch(
   }
   if (intents.length > 0) {
     form.append('intents', intents.join(','))
+  }
+  if (modelId) {
+    form.append('model_id', modelId)
+  }
+  // PDF page range (1-based, inclusive). Only meaningful when a PDF is uploaded.
+  if (pageRange?.start && pageRange.start > 0) {
+    form.append('page_start', String(pageRange.start))
+  }
+  if (pageRange?.end && pageRange.end > 0) {
+    form.append('page_end', String(pageRange.end))
   }
   const res = await fetchAPI('/api/image-analysis/batch', {
     method: 'POST',
@@ -111,9 +142,28 @@ export function retryImageAnalysisBatch(
   })
 }
 
+/** Re-extract: create a new batch reusing uploaded images with a different model. */
+export function reExtractImageAnalysisBatch(
+  batchId: string,
+  modelId: string,
+): Promise<BatchState> {
+  return requestJSON(`/api/image-analysis/batch/${encodeURIComponent(batchId)}/re-extract`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model_id: modelId }),
+  })
+}
+
 /** Abort a running batch. */
 export function abortImageAnalysisBatch(batchId: string): Promise<{ status: string }> {
   return requestJSON(`/api/image-analysis/batch/${encodeURIComponent(batchId)}/abort`, {
+    method: 'POST',
+  })
+}
+
+/** Manually delete the raw uploaded images of a finished batch. */
+export function cleanupImageAnalysisImages(batchId: string): Promise<{ status: string }> {
+  return requestJSON(`/api/image-analysis/batch/${encodeURIComponent(batchId)}/cleanup-images`, {
     method: 'POST',
   })
 }
@@ -152,8 +202,19 @@ export function streamImageAnalysisBatch(
           if (line.startsWith('data: ')) {
             try {
               const data = JSON.parse(line.slice(6))
-              if (data.type === 'image_analysis_progress' || data.type === 'image_analysis_done') {
+              if (data.type === 'image_analysis_progress') {
+                // Progress event: valid ProgressEvent with current_page.
                 onEvent(data.data as ProgressEvent)
+              } else if (data.type === 'image_analysis_done') {
+                // Done event: data is BatchResult (no current_page).
+                // Signal completion via status so the caller fetches final state.
+                const result = data.data as BatchResult
+                onEvent({
+                  batch_id: result.batch_id,
+                  status: result.status,
+                  current_page: 0, // will be overwritten by API fetch
+                  total_pages: result.total_pages,
+                })
               }
             } catch {
               // skip malformed SSE lines

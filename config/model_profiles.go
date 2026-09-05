@@ -1,6 +1,9 @@
 package config
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 const (
 	DefaultContextWindowTokens = 400000
@@ -15,10 +18,18 @@ type ModelProfileSettings struct {
 	OpenAIModel         string   `toml:"openai_model,omitempty" json:"openai_model,omitempty"`
 	Temperature         *float64 `toml:"temperature,omitempty" json:"temperature,omitempty"`
 	ContextWindowTokens *int     `toml:"context_window_tokens,omitempty" json:"context_window_tokens,omitempty"`
+	// ToolSafeWindowTokens 是工具模式的安全窗口（可选）。显式配置时，工具调用预算/注入
+	// 准入按此值执行（允许超过内置 81920 上限，供云端强模型一次注入大文件）；未配置时
+	// 回退到启发式（钳制窗口 × 物理安全系数）。
+	ToolSafeWindowTokens *int `toml:"tool_safe_window_tokens,omitempty" json:"tool_safe_window_tokens,omitempty"`
 	// DisableTools prevents the agent framework from injecting tool definitions
 	// into model requests. Use for local models (e.g. llama.cpp) whose native
 	// PEG tool-call grammar conflicts with free-form creative output.
 	DisableTools *bool `toml:"disable_tools,omitempty" json:"disable_tools,omitempty"`
+	// DefaultForImageAnalysis marks this profile as the preferred model for
+	// image analysis. When set, the image analysis panel pre-selects this
+	// profile. Only meaningful for multimodal/vision-capable models.
+	DefaultForImageAnalysis *bool `toml:"default_for_image_analysis,omitempty" json:"default_for_image_analysis,omitempty"`
 }
 
 type AgentModelSettings struct {
@@ -53,9 +64,12 @@ type ResolvedModelSettings struct {
 	OpenAIModel         string
 	Temperature         *float64
 	ContextWindowTokens int
-	EnableThinking      *bool
-	ReasoningEffort     string
-	DisableTools        bool
+	// ToolSafeWindowTokens 是显式配置的工具模式安全窗口；0 表示未配置（回退启发式）。
+	ToolSafeWindowTokens    int
+	EnableThinking          *bool
+	ReasoningEffort         string
+	DisableTools            bool
+	DefaultForImageAnalysis bool
 	// WriterProfileID 是已解析的叙事写手模型配置 ID，空表示未配置写手。
 	WriterProfileID string
 }
@@ -114,18 +128,32 @@ func ResolveAgentModel(cfg *Config, agentKind string) ResolvedModelSettings {
 	if profile.DisableTools != nil {
 		disableTools = *profile.DisableTools
 	}
-	return ResolvedModelSettings{
-		ProfileID:           profileID,
-		OpenAIAPIKey:        profile.OpenAIAPIKey,
-		OpenAIBaseURL:       profile.OpenAIBaseURL,
-		OpenAIModel:         profile.OpenAIModel,
-		Temperature:         temperature,
-		ContextWindowTokens: *profile.ContextWindowTokens,
-		EnableThinking:      agentOverride.EnableThinking,
-		ReasoningEffort:     normalizeReasoningEffort(agentOverride.ReasoningEffort),
-		DisableTools:        disableTools,
-		WriterProfileID:     normalizeModelProfileID(agentOverride.WriterProfileID),
+	defaultForImageAnalysis := false
+	if profile.DefaultForImageAnalysis != nil {
+		defaultForImageAnalysis = *profile.DefaultForImageAnalysis
 	}
+	return ResolvedModelSettings{
+		ProfileID:               profileID,
+		OpenAIAPIKey:            profile.OpenAIAPIKey,
+		OpenAIBaseURL:           profile.OpenAIBaseURL,
+		OpenAIModel:             profile.OpenAIModel,
+		Temperature:             temperature,
+		ContextWindowTokens:     *profile.ContextWindowTokens,
+		ToolSafeWindowTokens:    profileToolSafeWindow(profile),
+		EnableThinking:          agentOverride.EnableThinking,
+		ReasoningEffort:         normalizeReasoningEffort(agentOverride.ReasoningEffort),
+		DisableTools:            disableTools,
+		DefaultForImageAnalysis: defaultForImageAnalysis,
+		WriterProfileID:         normalizeModelProfileID(agentOverride.WriterProfileID),
+	}
+}
+
+// profileToolSafeWindow 返回 profile 显式配置的工具安全窗口；未配置时为 0。
+func profileToolSafeWindow(profile ModelProfileSettings) int {
+	if profile.ToolSafeWindowTokens != nil && *profile.ToolSafeWindowTokens > 0 {
+		return *profile.ToolSafeWindowTokens
+	}
+	return 0
 }
 
 // buildModelProfileMap 构建已合并默认值的模型配置映射，"default" 条目已回填
@@ -198,15 +226,65 @@ func ResolveProfileModel(cfg *Config, profileID string) ResolvedModelSettings {
 	if profile.DisableTools != nil {
 		disableTools = *profile.DisableTools
 	}
-	return ResolvedModelSettings{
-		ProfileID:           id,
-		OpenAIAPIKey:        profile.OpenAIAPIKey,
-		OpenAIBaseURL:       profile.OpenAIBaseURL,
-		OpenAIModel:         profile.OpenAIModel,
-		Temperature:         profile.Temperature,
-		ContextWindowTokens: *profile.ContextWindowTokens,
-		DisableTools:        disableTools,
+	defaultForImageAnalysis := false
+	if profile.DefaultForImageAnalysis != nil {
+		defaultForImageAnalysis = *profile.DefaultForImageAnalysis
 	}
+	return ResolvedModelSettings{
+		ProfileID:               id,
+		OpenAIAPIKey:            profile.OpenAIAPIKey,
+		OpenAIBaseURL:           profile.OpenAIBaseURL,
+		OpenAIModel:             profile.OpenAIModel,
+		Temperature:             profile.Temperature,
+		ContextWindowTokens:     *profile.ContextWindowTokens,
+		ToolSafeWindowTokens:    profileToolSafeWindow(profile),
+		DisableTools:            disableTools,
+		DefaultForImageAnalysis: defaultForImageAnalysis,
+	}
+}
+
+// ModelProfileOption is a lightweight representation of a model profile for UI selection.
+type ModelProfileOption struct {
+	ID                      string `json:"id"`
+	Name                    string `json:"name"`
+	Model                   string `json:"model"`
+	DefaultForImageAnalysis bool   `json:"default_for_image_analysis"`
+}
+
+// ListModelProfiles returns all configured model profiles as selectable options
+// for the frontend. The "default" profile is always included and sorted first.
+func ListModelProfiles(cfg *Config) []ModelProfileOption {
+	if cfg == nil {
+		return nil
+	}
+	profiles := buildModelProfileMap(cfg)
+	out := make([]ModelProfileOption, 0, len(profiles))
+	for id, p := range profiles {
+		name := p.Name
+		if name == "" {
+			name = id
+		}
+		isDefault := false
+		if p.DefaultForImageAnalysis != nil {
+			isDefault = *p.DefaultForImageAnalysis
+		}
+		out = append(out, ModelProfileOption{
+			ID:                      id,
+			Name:                    name,
+			Model:                   p.OpenAIModel,
+			DefaultForImageAnalysis: isDefault,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ID == "default" {
+			return true
+		}
+		if out[j].ID == "default" {
+			return false
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out
 }
 
 func mergeModelProfiles(parent, child []ModelProfileSettings) []ModelProfileSettings {

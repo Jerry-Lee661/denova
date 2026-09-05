@@ -80,17 +80,17 @@ func verifyMutation(bookService *book.Service, mutation ToolMutation) []PostRunV
 	deletion := isDeletionMutation(mutation.ToolName)
 	switch {
 	case deletion && errors.Is(statErr, os.ErrNotExist):
-		checks = append(checks, PostRunVerificationCheck{Type: "path_exists", Target: target, Status: "ok", Message: "deleted target is absent"})
+		checks = append(checks, PostRunVerificationCheck{Type: "path_exists", Target: mutation.Target, Status: "ok", Message: "deleted target is absent"})
 	case deletion && statErr == nil:
-		checks = append(checks, PostRunVerificationCheck{Type: "path_exists", Target: target, Status: "warning", Message: "delete-like tool returned but target still exists"})
+		checks = append(checks, PostRunVerificationCheck{Type: "path_exists", Target: mutation.Target, Status: "warning", Message: "delete-like tool returned but target still exists"})
 	case statErr != nil:
-		checks = append(checks, PostRunVerificationCheck{Type: "path_exists", Target: target, Status: "warning", Message: statErr.Error()})
+		checks = append(checks, PostRunVerificationCheck{Type: "path_exists", Target: mutation.Target, Status: "warning", Message: statErr.Error()})
 	default:
 		kind := "file"
 		if info.IsDir() {
 			kind = "directory"
 		}
-		checks = append(checks, PostRunVerificationCheck{Type: "path_exists", Target: target, Status: "ok", Message: kind + " exists"})
+		checks = append(checks, PostRunVerificationCheck{Type: "path_exists", Target: mutation.Target, Status: "ok", Message: kind + " exists"})
 	}
 	if strings.HasPrefix(relativeTarget, "chapters/") && !isChapterContentPath(relativeTarget) {
 		checks = append(checks, PostRunVerificationCheck{Type: "chapter_path", Target: target, Status: "warning", Message: "chapter writes should use .md or .txt files under chapters/"})

@@ -338,13 +338,17 @@ func TestSessionConversationUsesCompactionSummaryRetainedTailAndAppendedMessages
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(history) != 6 {
-		t.Fatalf("history length = %d, want 6: %#v", len(history), history)
+	// 新投影语义（目标 H）：摘要 + retainTailByUserTurns(全部有效消息, retainedTurns)。
+	// 有效消息 = [user1, asst1, user2, asst2, user3]（含新追加的 user3）。
+	// RetainedTurns=2 → 从末尾数 2 个用户轮：user3(count=1), user2(count=2) → 保留 [user2, asst2, user3]。
+	// PrepareMessages 替换末尾为 agent user 3 → [summary, user2, asst2, agent user 3] = 4 条。
+	if len(history) != 4 {
+		t.Fatalf("history length = %d, want 4: %#v", len(history), history)
 	}
 	if !isContextCompactionMessage(history[0]) || history[0].Role != schema.User {
 		t.Fatalf("first message should be compaction summary: %#v", history[0])
 	}
-	if history[1].Content != "user 1" || history[2].Content != "assistant 1" || history[3].Content != "user 2" || history[4].Content != "assistant 2" || history[5].Content != "agent user 3" {
+	if history[1].Content != "user 2" || history[2].Content != "assistant 2" || history[3].Content != "agent user 3" {
 		t.Fatalf("unexpected compacted history tail: %#v", history)
 	}
 	if visible := sess.History(); len(visible) != 5 {
@@ -386,16 +390,11 @@ func TestSessionConversationKeepsPostCompactionTurnsUntilNextCompaction(t *testi
 		t.Fatal(err)
 	}
 	got := messageContents(history)
+	// 新投影语义（目标 H）：摘要 + retainTailByUserTurns(全部有效消息, retainedTurns)。
+	// 有效消息含新追加的 user6。RetainedTurns=1 → 仅保留最近 1 个用户轮（user6），
+	// user5/assistant5 已折叠进摘要（source 覆盖到 total-1）。Prepare 替换末尾为 agent user 6。
 	want := []string{
 		history[0].Content,
-		"user 2",
-		"assistant 2",
-		"user 3",
-		"assistant 3",
-		"user 4",
-		"assistant 4",
-		"user 5",
-		"assistant 5",
 		"agent user 6",
 	}
 	if !isContextCompactionMessage(history[0]) {
@@ -408,6 +407,159 @@ func TestSessionConversationKeepsPostCompactionTurnsUntilNextCompaction(t *testi
 		if got[i] != want[i] {
 			t.Fatalf("history[%d] = %q, want %q; all=%#v", i, got[i], want[i], got)
 		}
+	}
+}
+
+// TestSessionConversationProjectionFoldsOldTurnsIntoSummary verifies target H:
+// after compaction the model-visible projection must fold history the same way
+// compactMessagesForModel does — summary + retainTailByUserTurns(all effective
+// messages, retainedTurns) — so old turns are compressed into the summary rather
+// than appended verbatim (the old compactedMessagesAfterSource bug that kept
+// every post-source message and triggered compaction every round).
+func TestSessionConversationProjectionFoldsOldTurnsIntoSummary(t *testing.T) {
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := store.GetOrCreate("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 5; i++ {
+		if err := sess.Append(schema.UserMessage("user " + string(rune('0'+i)))); err != nil {
+			t.Fatal(err)
+		}
+		if err := sess.Append(schema.AssistantMessage("assistant "+string(rune('0'+i)), nil)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := sess.AppendContextCompaction(session.ContextCompaction{
+		AgentKind:        config.AgentKindIDE,
+		Summary:          "用户目标：继续写作。",
+		SourceStartIndex: 0,
+		SourceEndIndex:   4,
+		RetainedTurns:    2,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{}
+	conversation := NewSessionConversationForAgent(sess, cfg, config.AgentKindIDE)
+	history, err := conversation.PrepareMessages("user 6", "agent user 6")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := messageContents(history)
+	// RetainedTurns=2 → 从末尾数 2 个用户轮：user6(count=1), user5(count=2) → 保留 [user5, asst5, user6]。
+	// 前 4 轮（user1-user4）折叠进摘要。Prepare 替换末尾为 agent user 6。
+	want := []string{
+		history[0].Content, // summary
+		"user 5",
+		"assistant 5",
+		"agent user 6",
+	}
+	if !isContextCompactionMessage(history[0]) {
+		t.Fatalf("first message should be compaction summary: %#v", history[0])
+	}
+	if len(got) != len(want) {
+		t.Fatalf("projection length = %d, want %d: %#v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("projection[%d] = %q, want %q; all=%#v", i, got[i], want[i], got)
+		}
+	}
+}
+
+func TestSessionConversationCompactionAppliesToolModeWindowCap(t *testing.T) {
+	previous := summarizeContextForCompaction
+	defer func() { summarizeContextForCompaction = previous }()
+	summarizeContextForCompaction = func(_ context.Context, _ *config.Config, _ string, _ string, _ []*schema.Message, _ string, _ int, _ contextCompactionPolicy, _ func(int, string)) (string, int, error) {
+		return "压缩摘要：旧对话已合并。", 100, nil
+	}
+
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := store.GetOrCreate("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Append(schema.UserMessage("旧用户请求")); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Append(schema.AssistantMessage("旧助手回复", nil)); err != nil {
+		t.Fatal(err)
+	}
+	// 工具模式（IDE 默认启用工具）：压缩判定沿用模型声明的 1M 窗口。
+	cfg := &config.Config{OpenAIContextWindowTokens: 1_000_000}
+	conversation := NewSessionConversationForAgent(sess, cfg, config.AgentKindIDE)
+	history, err := conversation.PrepareMessages("继续写", "继续写")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 调用方不传 ContextWindowTokens 时，仍应从当前 agent profile 解析模型窗口。
+	compacted, result, err := conversation.CompactContextIfNeeded(context.Background(), ContextCompactionInput{
+		Messages: history,
+		Force:    true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Triggered {
+		t.Fatalf("expected compaction to trigger: %#v", result)
+	}
+	if result.ContextWindowTokens != config.ResolveAgentModel(cfg, config.AgentKindIDE).ContextWindowTokens {
+		t.Fatalf("context window tokens = %d, want provider window %d", result.ContextWindowTokens, config.ResolveAgentModel(cfg, config.AgentKindIDE).ContextWindowTokens)
+	}
+	if len(compacted) == 0 || !isContextCompactionMessage(compacted[0]) {
+		t.Fatalf("compaction summary should lead compacted history: %#v", compacted)
+	}
+}
+
+func TestSessionConversationCompactionKeepsProviderWindowWithoutTools(t *testing.T) {
+	previous := summarizeContextForCompaction
+	defer func() { summarizeContextForCompaction = previous }()
+	summarizeContextForCompaction = func(_ context.Context, _ *config.Config, _ string, _ string, _ []*schema.Message, _ string, _ int, _ contextCompactionPolicy, _ func(int, string)) (string, int, error) {
+		return "压缩摘要：旧对话已合并。", 100, nil
+	}
+
+	store, err := session.NewStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := store.GetOrCreate("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Append(schema.UserMessage("旧用户请求")); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Append(schema.AssistantMessage("旧助手回复", nil)); err != nil {
+		t.Fatal(err)
+	}
+	// 非工具模式（version_summary 默认禁用所有工具）：不应触发工具模式硬上限，
+	// 压缩决策沿用 provider 声明的窗口。
+	cfg := &config.Config{OpenAIContextWindowTokens: 1_000_000}
+	conversation := NewSessionConversationForAgent(sess, cfg, config.AgentKindVersionSummary)
+	history, err := conversation.PrepareMessages("继续写", "继续写")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, result, err := conversation.CompactContextIfNeeded(context.Background(), ContextCompactionInput{
+		Messages: history,
+		Force:    true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Triggered {
+		t.Fatalf("expected compaction to trigger: %#v", result)
+	}
+	wantWindow := config.ResolveAgentModel(cfg, config.AgentKindVersionSummary).ContextWindowTokens
+	if result.ContextWindowTokens != wantWindow {
+		t.Fatalf("context window tokens = %d, want provider window %d (no tool-mode cap without tools)", result.ContextWindowTokens, wantWindow)
 	}
 }
 
@@ -495,4 +647,166 @@ func (c *contextLedgerReportingConversation) ContextLedgerParts() []ContextLedge
 }
 func (c *contextLedgerReportingConversation) RunTraceMetadata() RunTraceMetadata {
 	return c.metadata
+}
+func (c *contextLedgerReportingConversation) RuntimeState() session.RuntimeState {
+	return session.RuntimeState{}
+}
+
+// TestSessionConversationRecordsRuntimeStateForResume proves the production
+// recording path: a SessionConversation built with agent runtime context exposes
+// itself as a RuntimeStateRecorder, and RecordRuntimeState persists the state so
+// resume can replay it (Plan.md M11).
+func TestSessionConversationRecordsRuntimeStateForResume(t *testing.T) {
+	dir := t.TempDir()
+	store, err := session.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := store.GetOrCreate("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A conversation built with agent runtime context must expose itself as a
+	// RuntimeStateRecorder so the run loop can persist it after each run. Route
+	// through the Conversation interface exactly like the run loop does.
+	var conversation Conversation = NewSessionConversationForAgent(sess, &config.Config{}, config.AgentKindIDE)
+	recorder, ok := conversation.(RuntimeStateRecorder)
+	if !ok || recorder == nil {
+		t.Fatal("SessionConversation must implement RuntimeStateRecorder")
+	}
+
+	// RuntimeState reports the bounded runtime context that affects the next turn.
+	state := conversation.RuntimeState()
+	if strings.TrimSpace(state.AgentKind) != config.AgentKindIDE {
+		t.Fatalf("RuntimeState should report agent kind, got %#v", state)
+	}
+
+	// Recording via the recorder interface must persist and be replayable on resume.
+	if err := recorder.RecordRuntimeState(state); err != nil {
+		t.Fatal(err)
+	}
+
+	reloadedStore, err := session.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := reloadedStore.Get("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, found := reloaded.LatestRuntimeState()
+	if !found {
+		t.Fatal("expected persisted runtime state after RecordRuntimeState")
+	}
+	if got.AgentKind != config.AgentKindIDE {
+		t.Fatalf("reloaded runtime state agent kind mismatch: %#v", got)
+	}
+}
+
+// TestSessionConversationPrependsRuntimeStateForResume proves the M11
+// consumption side: a conversation whose session has a recorded runtime state
+// prepends that state as a leading model message so resume inherits the exact
+// "work site" (Plan.md M11).
+func TestSessionConversationPrependsRuntimeStateForResume(t *testing.T) {
+	dir := t.TempDir()
+	store, err := session.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := store.GetOrCreate("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conversation := NewSessionConversationForAgent(sess, &config.Config{}, config.AgentKindIDE)
+
+	// Record a runtime state with several fields populated.
+	state := session.RuntimeState{
+		AgentKind: config.AgentKindIDE,
+		Mode:      "writing",
+		StoryID:   "story-1",
+		BranchID:  "branch-a",
+		LastRead:  "chapters/ch00003.md",
+		Settings:  map[string]string{"teller_id": "classic"},
+	}
+	if err := conversation.RecordRuntimeState(state); err != nil {
+		t.Fatal(err)
+	}
+
+	messages, err := conversation.PrepareMessages("继续写第三章", "继续写第三章")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(messages) < 2 {
+		t.Fatalf("expected runtime-state leading message plus final user message, got %d messages", len(messages))
+	}
+
+	leading := messages[0]
+	if leading.Role != schema.User {
+		t.Fatalf("runtime state should be a leading user message, role=%s", leading.Role)
+	}
+	for _, want := range []string{"story-1", "branch-a", "ch00003.md", "classic"} {
+		if !strings.Contains(leading.Content, want) {
+			t.Fatalf("runtime state leading message missing %q:\n%s", want, leading.Content)
+		}
+	}
+}
+
+// TestSessionConversationNoRuntimeStateWhenEmpty proves the leading message is
+// omitted when no runtime state has been recorded.
+func TestSessionConversationNoRuntimeStateWhenEmpty(t *testing.T) {
+	dir := t.TempDir()
+	store, err := session.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := store.GetOrCreate("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conversation := NewSessionConversationForAgent(sess, &config.Config{}, config.AgentKindIDE)
+	messages, err := conversation.PrepareMessages("开始", "开始")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := conversation.runtimeStateSource(); ok {
+		t.Fatal("expected empty runtime state source for fresh session")
+	}
+	if len(messages) < 1 {
+		t.Fatalf("expected at least one message, got %d", len(messages))
+	}
+}
+
+// TestSessionConversationRuntimeStateIncludesActiveBranch proves that
+// RuntimeState reports the session's active branch so resume can inherit
+// work tree ownership (Plan.md M11).
+func TestSessionConversationRuntimeStateIncludesActiveBranch(t *testing.T) {
+	dir := t.TempDir()
+	store, err := session.NewStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := store.GetOrCreate("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Append messages and fork to create an active branch.
+	for i := 0; i < 3; i++ {
+		if err := sess.Append(schema.UserMessage("base")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := sess.Fork("branch-x", "1"); err != nil {
+		t.Fatal(err)
+	}
+
+	conversation := NewSessionConversationForAgent(sess, &config.Config{}, config.AgentKindIDE)
+	state := conversation.RuntimeState()
+
+	if strings.TrimSpace(state.BranchID) != "branch-x" {
+		t.Fatalf("RuntimeState should report active branch, got %#v", state)
+	}
 }

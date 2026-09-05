@@ -2,7 +2,7 @@ import { create } from 'zustand'
 
 export type RightPanel = 'ai' | 'lore' | 'creator' | 'teller' | 'outline' | 'characters' | 'versions' | null
 type BottomPanel = 'versions' | 'problems' | null
-export type WorkspaceMode = 'ide' | 'interactive' | 'books' | 'skills' | 'agents' | 'automations'
+export type WorkspaceMode = 'ide' | 'interactive' | 'books' | 'skills' | 'agents' | 'automations' | 'image-analysis'
 
 const MODE_STORAGE_KEY = 'nova:mode'
 const CONTENT_MODE_STORAGE_KEY = 'nova:content-mode'
@@ -24,7 +24,7 @@ function readInitialRightPanel(): RightPanel {
 }
 
 function isWorkspaceMode(value: unknown): value is WorkspaceMode {
-  return value === 'ide' || value === 'interactive' || value === 'books' || value === 'skills' || value === 'agents' || value === 'automations'
+  return value === 'ide' || value === 'interactive' || value === 'books' || value === 'skills' || value === 'agents' || value === 'automations' || value === 'image-analysis'
 }
 
 function isRightPanel(value: unknown): value is RightPanel {

@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -510,6 +512,106 @@ func TestToolOrchestratorTruncatesStreamResultWhenLimitConfigured(t *testing.T) 
 	}
 }
 
+func TestToolInjectionAdmissionBlocksLargeRead(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "chapters"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 大文件：整章量级（几千行），默认 limit 读取应被准入控制拦截。
+	big := strings.Repeat("这是一行很长很长的中文正文内容，用来验证整章全量读取会不会被准入控制拦截。\n", 3000)
+	if err := os.WriteFile(filepath.Join(workspace, "chapters", "ch00001-正文.md"), []byte(big), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := newRunLedger(workspace, RunLedgerPolicy{Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	observer := newRunObserver(ledger, "root-span")
+	observer.RecordBudgetSnapshot(60000, 65536) // projected 已接近工具安全窗口
+	ctx := ContextWithRunObserver(context.Background(), observer)
+
+	middleware := &toolOrchestratorMiddleware{agentKind: AgentKindIDE, workspace: workspace}
+	called := false
+	endpoint, err := middleware.WrapInvokableToolCall(
+		context.Background(),
+		func(context.Context, string, ...tool.Option) (string, error) {
+			called = true
+			return "ok", nil
+		},
+		&adk.ToolContext{Name: "read_file", CallID: "call-read-big"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := endpoint(ctx, `{"file_path":"chapters/ch00001-正文.md"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("large read should be blocked before execution")
+	}
+	if !strings.Contains(result, "tool_injection_blocked") || !strings.Contains(result, "offset+limit") {
+		t.Fatalf("expected injection-blocked guidance, got: %s", result)
+	}
+}
+
+func TestToolInjectionAdmissionAllowsSmallRead(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "chapters"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "chapters", "ch01.md"), []byte("短正文内容"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := newRunLedger(workspace, RunLedgerPolicy{Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	observer := newRunObserver(ledger, "root-span")
+	observer.RecordBudgetSnapshot(60000, 65536)
+	ctx := ContextWithRunObserver(context.Background(), observer)
+
+	middleware := &toolOrchestratorMiddleware{agentKind: AgentKindIDE, workspace: workspace}
+	called := false
+	endpoint, err := middleware.WrapInvokableToolCall(
+		context.Background(),
+		func(context.Context, string, ...tool.Option) (string, error) {
+			called = true
+			return "ok", nil
+		},
+		&adk.ToolContext{Name: "read_file", CallID: "call-read-small"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := endpoint(ctx, `{"file_path":"chapters/ch01.md","limit":20}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatalf("small read should execute, got blocked: %s", result)
+	}
+}
+
+func TestEstimateReadFileInjectionTokens(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "big.md"), []byte(strings.Repeat("内容\n", 5000)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tokens, err := estimateReadFileInjectionTokens(workspace, `{"file_path":"big.md"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tokens <= 0 {
+		t.Fatalf("expected positive estimate, got %d", tokens)
+	}
+	if tokens > 200000 {
+		t.Fatalf("estimate unexpectedly large: %d", tokens)
+	}
+}
+
 func TestNewFilesystemMiddlewareRespectsToolSettings(t *testing.T) {
 	backend, err := localbk.NewBackend(context.Background(), &localbk.Config{})
 	if err != nil {
@@ -547,5 +649,181 @@ func TestNewFilesystemMiddlewareRespectsToolSettings(t *testing.T) {
 		if !names[name] {
 			t.Fatalf("tool %s should keep a stable schema and be blocked by orchestrator, names=%v", name, names)
 		}
+	}
+}
+
+func TestToolInjectionAdmissionAccountsForCumulativeInjection(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "chapters"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	big := strings.Repeat("这是一行很长很长的中文正文内容，用来验证批内累计注入会不会被准入拦截。\n", 3000)
+	if err := os.WriteFile(filepath.Join(workspace, "chapters", "ch00001-正文.md"), []byte(big), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := newRunLedger(workspace, RunLedgerPolicy{Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	observer := newRunObserver(ledger, "root-span")
+	// projected 较低（30000）：单次读大文件 30000+33333=63333<65536 会放行；
+	// 但同一批已注入 30000 后，30000+30000+33333=93333>65536 应拒绝——这正是
+	// "跨多次工具调用的累计注入上限"要拦的场景。
+	observer.RecordBudgetSnapshot(30000, 65536)
+	observer.AddInjectedTokens(30000)
+	ctx := ContextWithRunObserver(context.Background(), observer)
+
+	middleware := &toolOrchestratorMiddleware{agentKind: AgentKindIDE, workspace: workspace}
+	called := false
+	endpoint, err := middleware.WrapInvokableToolCall(
+		context.Background(),
+		func(context.Context, string, ...tool.Option) (string, error) {
+			called = true
+			return "ok", nil
+		},
+		&adk.ToolContext{Name: "read_file", CallID: "call-read-cumulative"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := endpoint(ctx, `{"file_path":"chapters/ch00001-正文.md"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("cumulative-injected read should be blocked before execution")
+	}
+	if !strings.Contains(result, "tool_injection_blocked") {
+		t.Fatalf("expected injection-blocked, got: %s", result)
+	}
+}
+
+func TestToolInjectionAdmissionAllowsWithinCumulativeBudget(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "chapters"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "chapters", "ch01.md"), []byte("短正文"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ledger, err := newRunLedger(workspace, RunLedgerPolicy{Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	observer := newRunObserver(ledger, "root-span")
+	observer.RecordBudgetSnapshot(10000, 65536)
+	observer.AddInjectedTokens(20000) // 已注入 2w，但小读取估算很小，仍应放行
+	ctx := ContextWithRunObserver(context.Background(), observer)
+
+	middleware := &toolOrchestratorMiddleware{agentKind: AgentKindIDE, workspace: workspace}
+	called := false
+	endpoint, err := middleware.WrapInvokableToolCall(
+		context.Background(),
+		func(context.Context, string, ...tool.Option) (string, error) {
+			called = true
+			return "ok", nil
+		},
+		&adk.ToolContext{Name: "read_file", CallID: "call-read-ok"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := endpoint(ctx, `{"file_path":"chapters/ch01.md","limit":10}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called {
+		t.Fatalf("small read within cumulative budget should execute, got: %s", result)
+	}
+}
+
+func TestBudgetSnapshotResetClearsCumulativeInjection(t *testing.T) {
+	observer := newRunObserver(nil, "root-span")
+	observer.RecordBudgetSnapshot(1000, 65536)
+	observer.AddInjectedTokens(5000)
+	if got := observer.InjectedTokensSinceSnapshot(); got != 5000 {
+		t.Fatalf("cumulative = %d, want 5000", got)
+	}
+	// 新一轮模型请求（快照重置）后，累计清零——上一批结果已进入下一轮 projected。
+	observer.RecordBudgetSnapshot(6000, 65536)
+	if got := observer.InjectedTokensSinceSnapshot(); got != 0 {
+		t.Fatalf("cumulative after snapshot reset = %d, want 0", got)
+	}
+}
+
+// TestApplyToolResultBatchBudgetAccumulatesBytes 验证一条消息内并行工具结果总和
+// 超过聚合预算时累计字节正确；未设上限或无 observer 时不强制外置。
+func TestApplyToolResultBatchBudgetAccumulatesBytes(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewResultStore(dir, "sess")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const batchLimit = 200 * 1024
+	mw := &toolOrchestratorMiddleware{
+		agentKind:                 AgentKindIDE,
+		resultStore:               store,
+		toolResultMaxBytes:        defaultToolResultMaxBytes,
+		toolResultBatchLimitBytes: batchLimit,
+	}
+	ctx := context.Background()
+
+	// 无 observer 时直接返回过滤结果（不累计字节）。
+	// 使用 20KB（低于 read_file 外置阈值 32KB），隔离聚合预算行为。
+	filtered := mw.applyToolResultPolicy(ctx, "read_file", `{"file_path":"d"}`, strings.Repeat("q", 20*1024))
+	if filtered.Externalized {
+		t.Fatal("no observer should not externalize for budget")
+	}
+
+	obs := newRunObserver(nil, "root-span")
+	ctx = ContextWithRunObserver(ctx, obs)
+
+	// 前两次各 20KB，累计仍在预算内（<= limit），未外置（< 32KB read_file 阈值）。
+	for i := 0; i < 2; i++ {
+		f := mw.applyToolResultPolicy(ctx, "read_file", `{"file_path":"d"}`, strings.Repeat("q", 20*1024))
+		if f.Externalized {
+			t.Fatalf("call %d: within budget result should not externalize", i)
+		}
+	}
+	cumAfterTwo := obs.InjectedBytesSinceSnapshot()
+	if cumAfterTwo <= 20*1024 || cumAfterTwo >= batchLimit {
+		t.Fatalf("cumulative after two calls = %d, want (20KB, 200KB)", cumAfterTwo)
+	}
+
+	// 第三次 20KB，累计仍在预算内；且 < 32KB 阈值所以仍不外置。
+	f := mw.applyToolResultPolicy(ctx, "read_file", `{"file_path":"d"}`, strings.Repeat("q", 20*1024))
+	if f.Externalized {
+		t.Fatal("small over-budget result stays inline")
+	}
+	if got := obs.InjectedBytesSinceSnapshot(); got <= cumAfterTwo {
+		t.Fatalf("cumulative should grow after third call: %d -> %d", cumAfterTwo, got)
+	}
+}
+
+// TestApplyToolResultBatchBudgetExternalizesOverLimit 验证超预算且超过单结果阈值的结果被外置降级。
+func TestApplyToolResultBatchBudgetExternalizesOverLimit(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewResultStore(dir, "sess")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 预算 15KB < 单结果 20KB（低于 read_file 外置阈值 32KB），
+	// 单结果路径不外置，但累计超预算 → 聚合预算路径外置降级。
+	const batchLimit = 15 * 1024
+	mw := &toolOrchestratorMiddleware{
+		agentKind:                 AgentKindIDE,
+		resultStore:               store,
+		toolResultMaxBytes:        defaultToolResultMaxBytes,
+		toolResultBatchLimitBytes: batchLimit,
+	}
+	obs := newRunObserver(nil, "root-span")
+	ctx := ContextWithRunObserver(context.Background(), obs)
+
+	// 20KB > 15KB 预算，但 < 32KB read_file 阈值 → 聚合预算路径外置。
+	f := mw.applyToolResultPolicy(ctx, "read_file", `{"file_path":"d"}`, strings.Repeat("q", 20*1024))
+	if !f.Externalized {
+		t.Fatal("over-budget result should externalize via batch budget path")
 	}
 }

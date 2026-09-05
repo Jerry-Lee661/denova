@@ -371,6 +371,9 @@ func (c *interactiveProtocolConversation) ResolveInterruption(string) error { re
 func (c *interactiveProtocolConversation) InteractiveNarrativeReady() bool {
 	return c != nil && c.ready != nil && c.ready.Load()
 }
+func (c *interactiveProtocolConversation) RuntimeState() session.RuntimeState {
+	return session.RuntimeState{}
+}
 
 type interactiveTurnProtocolChatModel struct {
 	mu          sync.Mutex

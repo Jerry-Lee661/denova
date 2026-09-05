@@ -274,13 +274,20 @@ func waitForAnyKey(input io.Reader) {
 
 // selectFrontendPort 为前端 Vite dev server 自动选择一个可用端口。
 // 与 HTTP 后端端口不同，前端端口总是尝试自动选择（因为 Vite 不负责端口协商）。
+// 搜索范围设为 200 以覆盖 Windows excludedportrange 段（通常宽 100）。
 func selectFrontendPort(preferred string, reservedPorts ...string) string {
 	if !portReserved(preferred, reservedPorts...) && portAvailable(preferred) {
 		return preferred
 	}
 
-	next, err := findAvailablePort(preferred, 20, reservedPorts...)
+	next, err := findAvailablePort(preferred, 200, reservedPorts...)
 	if err != nil {
+		// 顺序搜索全部失败时，让 OS 随机分配一个可用端口作为兜底
+		if randomPort := osRandomPort(); randomPort != "" {
+			fmt.Fprintf(os.Stderr, "提示: 前端端口 %s 不可用，已由系统随机分配 %s\n", preferred, randomPort)
+			log.Printf("[startup] 前端端口 %s 不可用，系统随机分配 %s", preferred, randomPort)
+			return randomPort
+		}
 		fmt.Fprintf(os.Stderr, "警告: 前端端口 %s 不可用且自动选择失败: %v\n", preferred, err)
 		log.Printf("[startup] 前端端口 %s 不可用且自动选择失败 err=%v", preferred, err)
 		return preferred
@@ -289,6 +296,17 @@ func selectFrontendPort(preferred string, reservedPorts ...string) string {
 	fmt.Fprintf(os.Stderr, "提示: 前端端口 %s 已被占用，已自动改用 %s\n", preferred, next)
 	log.Printf("[startup] 前端端口 %s 已被占用，自动改用 %s", preferred, next)
 	return next
+}
+
+// osRandomPort 让操作系统随机分配一个可用 TCP 端口，用于顺序搜索全部失败时的兜底。
+func osRandomPort() string {
+	ln, err := net.Listen("tcp", "0.0.0.0:0")
+	if err != nil {
+		return ""
+	}
+	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
+	_ = ln.Close()
+	return port
 }
 
 func findAvailablePort(preferred string, attempts int, reservedPorts ...string) (string, error) {

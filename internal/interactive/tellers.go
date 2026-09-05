@@ -4,13 +4,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
 
+	"denova/internal/sensitive"
 	"denova/internal/styleref"
 )
 
@@ -784,9 +787,36 @@ var builtinTellers = map[string]Teller{
 		{ID: "turn_context", Name: "本轮上下文", Target: "turn_context", Enabled: true, Content: "处理本轮时，先判断当前场景的目标和阻力，再安排一个可见的行动反馈、一个关系或信息变化，以及一个推动下一拍的开放入口。成功要带来新压力，失败要留下可继续尝试的路径；如果场景已经达到高潮，应及时给出转折、代价或短暂收束，而不是无限拖延同一冲突。"},
 	}),
 	"direct-erotica": builtinTeller("direct-erotica", "直白情色", "以事件驱动故事，自然导向情色场景，文风直白粗俗", []TellerPromptSlot{
-		{ID: "identity", Name: "系统提示", Target: "system", Enabled: true, Content: "你是一个专为情色小说服务的讲述者，风格直白粗俗，毫不隐晦。你的任务是设计各种事件和情境，将故事自然导向情色发展，而非每轮强制插入性爱场面。你要让主角的行动影响剧情，让性成为情节的自然结果。使用最直接、最露骨的词汇描写性器官、性行为和性快感，避免委婉语或文艺修饰。保持剧情连贯，让情色内容服务于故事推进。必须使用下流露骨的词汇刻画性器官和其他身体部位，包括但不限于“奶子,乳房,奶头,乳头,小穴,阴道,尻穴,逼,逼穴,阴蒂,阴唇,屁眼,肛门,菊花,肉棒,鸡巴,精液”等。禁止性器官使用：花心 / 肉刃 / 花径 / 花穴 等美化词汇"},
-		{ID: "turn_context", Name: "本轮上下文", Target: "turn_context", Enabled: true, Content: "根据当前剧情阶段，决定是否引入情色元素。在铺垫期，重点推进故事、制造悬念、塑造人物关系、安排诱惑或暧昧情境；当情节点积累到合适时，才展开直白粗俗的性爱描写。不要强行让每轮都发生性行为，而是让事件驱动角色进入情色场景。描写时仍采用直白语言，详细刻画身体反应、性行为过程，但需确保情节合理、节奏有起伏。"},
+		{ID: "identity", Name: "系统提示", Target: "system", Enabled: true},
+		{ID: "turn_context", Name: "本轮上下文", Target: "turn_context", Enabled: true},
 	}),
+}
+
+func init() {
+	// 从 .gz 文件解压敏感提示词并注入到 builtinTellers
+	_, thisFile, _, _ := runtime.Caller(0)
+	pkgDir := filepath.Dir(thisFile)
+
+	identity, err := sensitive.ReadGzFile(filepath.Join(pkgDir, "tellers_direct_erotica_identity.txt.gz"))
+	if err != nil {
+		log.Printf("[tellers] decompress direct-erotica identity failed: %v", err)
+	}
+	turnCtx, err := sensitive.ReadGzFile(filepath.Join(pkgDir, "tellers_direct_erotica_turn_context.txt.gz"))
+	if err != nil {
+		log.Printf("[tellers] decompress direct-erotica turn_context failed: %v", err)
+	}
+
+	if teller, ok := builtinTellers["direct-erotica"]; ok {
+		for i := range teller.Slots {
+			switch teller.Slots[i].ID {
+			case "identity":
+				teller.Slots[i].Content = identity
+			case "turn_context":
+				teller.Slots[i].Content = turnCtx
+			}
+		}
+		builtinTellers["direct-erotica"] = teller
+	}
 }
 
 func builtinTeller(id, name, description string, slots []TellerPromptSlot) Teller {

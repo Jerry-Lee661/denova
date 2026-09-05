@@ -43,6 +43,18 @@ export interface AgentMessageView {
   input?: unknown
   output?: unknown
   errorText?: string
+  /** 该 run 的 token 统计（模型/合计 token/生成速度），由 token_usage part 按 run_id 关联到 assistant 文本 view。 */
+  tokenStats?: AgentTokenStats
+}
+
+/** 一次 Agent run 的聚合 token 统计，用于消息时间旁展示（Copilot 风格）。
+ *  数值字段可选：token_usage part 的对应字段可能缺失，缺失时按 0/不展示处理。 */
+export interface AgentTokenStats {
+  totalTokens?: number
+  completionTokens?: number
+  modelCalls?: number
+  durationMs?: number
+  speedTps?: number
 }
 
 export interface AgentTokenUsageRecord {
@@ -68,6 +80,7 @@ export interface AgentTokenUsageRecord {
 const messageViewsCache = new WeakMap<AgentUIMessage, AgentMessageView[]>()
 
 export function buildAgentMessageViews(messages: AgentUIMessage[]): AgentMessageView[] {
+  const runTokenStats = collectRunTokenStats(messages)
   const views: AgentMessageView[] = []
   messages.forEach((message) => {
     const cachedViews = messageViewsCache.get(message)
@@ -83,10 +96,53 @@ export function buildAgentMessageViews(messages: AgentUIMessage[]): AgentMessage
         if (view) messageViews.push(view)
       })
     }
+    // 把该 run 的 token 统计关联到本消息内的 assistant 文本 view（按 run_id，跨消息聚合）。
+    // token_usage 与文本可能在不同 part/消息，故用 run_id 关联而非假设同消息。
+    const runID = message.metadata?.run_id
+    const stats = runID ? runTokenStats.get(runID) : undefined
+    if (stats) {
+      for (const view of messageViews) {
+        if (view.kind === 'assistant' && !view.tokenStats) view.tokenStats = stats
+      }
+    }
     messageViewsCache.set(message, messageViews)
     views.push(...messageViews)
   })
   return views
+}
+
+/** 从所有消息的 token_usage part 聚合每个 run 的 token 统计，并估算生成速度（tokens/s）。 */
+function collectRunTokenStats(messages: AgentUIMessage[]): Map<string, AgentTokenStats> {
+  const map = new Map<string, AgentTokenStats>()
+  for (const message of messages) {
+    const runID = message.metadata?.run_id
+    if (!runID) continue
+    for (const part of message.parts) {
+      const raw = part as Record<string, unknown>
+      if (readString(raw.type) !== 'data-agent-token-usage') continue
+      const data = objectData(raw.data)
+      const totalTokens = readNumber(data.total_tokens) ?? 0
+      const completionTokens = readNumber(data.completion_tokens) ?? 0
+      if (totalTokens <= 0 && completionTokens <= 0) continue
+      const modelCalls = readNumber(data.model_calls)
+      const usageCalls = readUsageCalls(data.usage_calls)
+      const endAt = parseTimeMs(readString(data.created_at))
+      const startAt = usageCalls && usageCalls.length > 0 ? parseTimeMs(usageCalls[0].created_at) : undefined
+      const durationMs = startAt !== undefined && endAt !== undefined && endAt > startAt ? endAt - startAt : undefined
+      const speedTps = durationMs && durationMs > 0 && completionTokens > 0
+        ? completionTokens / (durationMs / 1000)
+        : undefined
+      map.set(runID, { totalTokens, completionTokens, modelCalls, durationMs, speedTps })
+      break
+    }
+  }
+  return map
+}
+
+function parseTimeMs(value: string | undefined): number | undefined {
+  if (!value) return undefined
+  const time = Date.parse(value)
+  return Number.isFinite(time) ? time : undefined
 }
 
 export function selectAgentTokenUsageRecords(messages: AgentUIMessage[]): AgentTokenUsageRecord[] {
@@ -160,7 +216,7 @@ export function agentViewToRenderMessage(view: AgentMessageView, options: { forc
     case 'user':
       return { id, role: 'user', content: view.content, streaming, ...meta }
     case 'assistant':
-      return { id, role: 'assistant', content: view.content, streaming, ...meta }
+      return { id, role: 'assistant', content: view.content, streaming, ...tokenStatsToChatFields(view.tokenStats), ...meta }
     case 'reasoning':
       return { id, role: 'thinking', content: view.content, streaming, ...meta }
     case 'tool': {
@@ -355,11 +411,25 @@ function metadataToChatFields(view: AgentMessageView): Partial<ChatMessage> {
     sse_display_notice: metadata.sse_display_notice,
     sse_generated_chars: metadata.sse_generated_chars,
     streaming_target_content: metadata.streaming_target_content,
+    model_name: metadata.model_name,
+    message_index: metadata.message_index,
     turn_id: metadata.turn_id,
     navigation_turn_id: metadata.navigation_turn_id,
     turn_versions: metadata.turn_versions,
     turn_version_index: metadata.turn_version_index,
     user_references: metadata.user_references,
+  }
+}
+
+/** 把按 run 聚合的 token 统计映射为 ChatMessage 字段（时间旁展示模型/合计 token/生成速度）。 */
+function tokenStatsToChatFields(stats: AgentTokenStats | undefined): Partial<ChatMessage> {
+  if (!stats) return {}
+  return {
+    total_tokens: stats.totalTokens || undefined,
+    completion_tokens: stats.completionTokens || undefined,
+    model_calls: stats.modelCalls || undefined,
+    duration_ms: stats.durationMs,
+    speed_tps: stats.speedTps,
   }
 }
 
@@ -591,6 +661,8 @@ function providerAgentMetadata(value: unknown): AgentMessageMetadata {
     sse_hidden_reason: readString(agent.sse_hidden_reason) || undefined,
     sse_display_notice: readString(agent.sse_display_notice) || undefined,
     sse_generated_chars: readNumber(agent.sse_generated_chars),
+    model_name: readString(agent.model_name) || undefined,
+    message_index: readNumber(agent.message_index),
     display_hidden: agent.display_hidden === true || undefined,
     streaming_target_content: readString(agent.streaming_target_content) || undefined,
     turn_id: readString(agent.turn_id) || undefined,

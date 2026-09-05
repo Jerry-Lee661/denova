@@ -256,6 +256,7 @@ function modeRouterProps(
     editorAutoSaveDelayMs: 1000,
     versionRefreshSignal: 0,
     messages: [],
+    checkpoints: [],
     sessions: [],
     activeSessionId: '',
     activityContent: '',

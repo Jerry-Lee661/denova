@@ -243,3 +243,217 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatal(err)
 	}
 }
+
+// capturingPathBackend 捕获 ls/glob/grep 请求，不真实访问文件系统。
+type capturingPathBackend struct {
+	filesystem.Backend
+	lastLs   *filesystem.LsInfoRequest
+	lastGlob *filesystem.GlobInfoRequest
+	lastGrep *filesystem.GrepRequest
+}
+
+func (b *capturingPathBackend) LsInfo(_ context.Context, req *filesystem.LsInfoRequest) ([]filesystem.FileInfo, error) {
+	if req == nil {
+		return nil, fmt.Errorf("ls request is nil")
+	}
+	next := *req
+	b.lastLs = &next
+	return nil, nil
+}
+
+func (b *capturingPathBackend) GlobInfo(_ context.Context, req *filesystem.GlobInfoRequest) ([]filesystem.FileInfo, error) {
+	if req == nil {
+		return nil, fmt.Errorf("glob request is nil")
+	}
+	next := *req
+	b.lastGlob = &next
+	return nil, nil
+}
+
+func (b *capturingPathBackend) GrepRaw(_ context.Context, req *filesystem.GrepRequest) ([]filesystem.GrepMatch, error) {
+	if req == nil {
+		return nil, fmt.Errorf("grep request is nil")
+	}
+	next := *req
+	b.lastGrep = &next
+	return nil, nil
+}
+
+func TestAgentFilesystemBackendLsAnchorsRelativeAndRejectsOutsideWorkspacePaths(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "作品 - 主")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 存在性检查：目标路径必须真实存在，ls 才会透传到底层；这里提前建好目录。
+	if err := os.MkdirAll(filepath.Join(workspace, "relative", "dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(workspace, "卷一 - 名"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(workspace, "卷一 - 名", "第一章 开局.md"), "内容")
+	inner := &capturingPathBackend{}
+	backend := newAgentFilesystemBackend(inner, workspace)
+
+	// 相对路径锚定到 workspace 根，避免模型复制长绝对路径时漂移。
+	if _, err := backend.LsInfo(context.Background(), &filesystem.LsInfoRequest{Path: "relative/dir"}); err != nil {
+		t.Fatalf("relative path should anchor to workspace root: %v", err)
+	}
+	if inner.lastLs == nil || inner.lastLs.Path != filepath.Join(workspace, "relative", "dir") {
+		t.Fatalf("relative path should anchor to workspace root, got %+v", inner.lastLs)
+	}
+
+	outside := filepath.Join(t.TempDir(), "outside.md")
+	if _, err := backend.LsInfo(context.Background(), &filesystem.LsInfoRequest{Path: outside}); err == nil || !strings.Contains(err.Error(), "outside the active workspace") {
+		t.Fatalf("outside-workspace path should be rejected, got %v", err)
+	}
+
+	inside := filepath.Join(workspace, "卷一 - 名", "第一章 开局.md")
+	if _, err := backend.LsInfo(context.Background(), &filesystem.LsInfoRequest{Path: inside}); err != nil {
+		t.Fatalf("in-workspace path should be accepted: %v", err)
+	}
+	if inner.lastLs == nil {
+		t.Fatal("expected inner backend to receive ls request")
+	}
+	if got, want := inner.lastLs.Path, filepath.Clean(inside); got != want {
+		t.Fatalf("ls path = %q, want normalized %q", got, want)
+	}
+}
+
+func TestAgentFilesystemBackendLsAcceptsDotPath(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inner := &capturingPathBackend{}
+	backend := newAgentFilesystemBackend(inner, workspace)
+
+	if _, err := backend.LsInfo(context.Background(), &filesystem.LsInfoRequest{Path: "."}); err != nil {
+		t.Fatalf("ls . should resolve to workspace root: %v", err)
+	}
+	if inner.lastLs == nil || inner.lastLs.Path != filepath.Clean(workspace) {
+		t.Fatalf("ls . should resolve to workspace root, got %+v", inner.lastLs)
+	}
+}
+
+func TestAgentFilesystemBackendLsDefaultsEmptyPathToWorkspaceRoot(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inner := &capturingPathBackend{}
+	backend := newAgentFilesystemBackend(inner, workspace)
+
+	if _, err := backend.LsInfo(context.Background(), &filesystem.LsInfoRequest{Path: ""}); err != nil {
+		t.Fatalf("empty ls path should fall back to workspace root: %v", err)
+	}
+	if inner.lastLs == nil || inner.lastLs.Path != filepath.Clean(workspace) {
+		t.Fatalf("empty ls path should resolve to workspace root, got %+v", inner.lastLs)
+	}
+}
+
+func TestAgentFilesystemBackendGlobAndGrepEnforceWorkspaceBounds(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// 存在性检查：glob 的搜索根路径必须真实存在才透传到底层。
+	if err := os.MkdirAll(filepath.Join(workspace, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inner := &capturingPathBackend{}
+	backend := newAgentFilesystemBackend(inner, workspace)
+
+	outside := filepath.Join(t.TempDir(), "outside")
+	if _, err := backend.GlobInfo(context.Background(), &filesystem.GlobInfoRequest{Pattern: "*.go", Path: outside}); err == nil || !strings.Contains(err.Error(), "outside the active workspace") {
+		t.Fatalf("glob outside workspace should be rejected, got %v", err)
+	}
+	if _, err := backend.GrepRaw(context.Background(), &filesystem.GrepRequest{Pattern: "foo", Path: outside}); err == nil || !strings.Contains(err.Error(), "outside the active workspace") {
+		t.Fatalf("grep outside workspace should be rejected, got %v", err)
+	}
+
+	inside := filepath.Join(workspace, "src")
+	if _, err := backend.GlobInfo(context.Background(), &filesystem.GlobInfoRequest{Pattern: "*.go", Path: inside}); err != nil {
+		t.Fatalf("glob inside workspace should be accepted: %v", err)
+	}
+	if inner.lastGlob == nil || inner.lastGlob.Path != filepath.Clean(inside) {
+		t.Fatalf("glob path should be passed through normalized, got %+v", inner.lastGlob)
+	}
+	if _, err := backend.GrepRaw(context.Background(), &filesystem.GrepRequest{Pattern: "foo", Path: inside}); err != nil {
+		t.Fatalf("grep inside workspace should be accepted: %v", err)
+	}
+	if inner.lastGrep == nil || inner.lastGrep.Path != filepath.Clean(inside) {
+		t.Fatalf("grep path should be passed through normalized, got %+v", inner.lastGrep)
+	}
+
+	// 空路径默认 workspace 根，grep 不落到进程工作目录。
+	if _, err := backend.GrepRaw(context.Background(), &filesystem.GrepRequest{Pattern: "foo"}); err != nil {
+		t.Fatalf("empty grep path should fall back to workspace root: %v", err)
+	}
+	if inner.lastGrep == nil || inner.lastGrep.Path != filepath.Clean(workspace) {
+		t.Fatalf("empty grep path should resolve to workspace root, got %+v", inner.lastGrep)
+	}
+}
+
+func TestAgentFilesystemBackendLsAndGlobReportMissingPath(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inner := &capturingPathBackend{}
+	backend := newAgentFilesystemBackend(inner, workspace)
+
+	// ls 不存在的路径 → 显式 file not found（触发 path_resolution_failed 恢复提示），
+	// 而非静默空结果让模型误以为是空目录。
+	if _, err := backend.LsInfo(context.Background(), &filesystem.LsInfoRequest{Path: "サマーハレーション"}); err == nil || !strings.Contains(err.Error(), "file not found") {
+		t.Fatalf("ls missing path should report file not found, got %v", err)
+	}
+	if inner.lastLs != nil {
+		t.Fatalf("ls missing path should not reach inner backend, got %+v", inner.lastLs)
+	}
+
+	// glob 不存在的搜索根 → 同样显式 file not found。
+	if _, err := backend.GlobInfo(context.Background(), &filesystem.GlobInfoRequest{Path: "サマーハレーション", Pattern: "**/*.txt"}); err == nil || !strings.Contains(err.Error(), "file not found") {
+		t.Fatalf("glob missing root should report file not found, got %v", err)
+	}
+	if inner.lastGlob != nil {
+		t.Fatalf("glob missing root should not reach inner backend, got %+v", inner.lastGlob)
+	}
+}
+
+func TestGrepRawFallsBackOnTruncatedAndURLEncodedPath(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workspace, "chapters"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	realFile := filepath.Join(workspace, "chapters", "ch00001-正文.md")
+	if err := os.WriteFile(realFile, []byte("正文内容"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	inner := &capturingPathBackend{}
+	backend := newAgentFilesystemBackend(inner, workspace)
+
+	// 截断路径 chapters/ch00001（缺 -正文）→ 父目录前缀唯一回退到 ch00001-正文.md。
+	if _, err := backend.GrepRaw(context.Background(), &filesystem.GrepRequest{Path: "chapters/ch00001", Pattern: "x"}); err != nil {
+		t.Fatalf("grep truncated path should fall back: %v", err)
+	}
+	if inner.lastGrep == nil || filepath.Clean(inner.lastGrep.Path) != filepath.Clean(realFile) {
+		t.Fatalf("grep truncated path should resolve to %q, got %+v", realFile, inner.lastGrep)
+	}
+
+	// URL 编码文件名 正文 → %E6%AD%A3%E6%96%87 → URL 解码回退。
+	if _, err := backend.GrepRaw(context.Background(), &filesystem.GrepRequest{Path: "chapters/ch00001-%E6%AD%A3%E6%96%87.md", Pattern: "x"}); err != nil {
+		t.Fatalf("grep URL-encoded path should fall back: %v", err)
+	}
+	if inner.lastGrep == nil || filepath.Clean(inner.lastGrep.Path) != filepath.Clean(realFile) {
+		t.Fatalf("grep URL-encoded path should resolve to %q, got %+v", realFile, inner.lastGrep)
+	}
+
+	// 乱编编号不唯一匹配 → 保持原路径，让底层暴露真实"路径不存在"。
+	if _, err := backend.GrepRaw(context.Background(), &filesystem.GrepRequest{Path: "chapters/ch00099.md", Pattern: "x"}); err != nil {
+		t.Fatalf("unmatched grep path should pass through, got %v", err)
+	}
+	if inner.lastGrep == nil || !strings.HasSuffix(filepath.ToSlash(inner.lastGrep.Path), "chapters/ch00099.md") {
+		t.Fatalf("unmatched grep path should pass through unchanged, got %+v", inner.lastGrep)
+	}
+}

@@ -1405,6 +1405,11 @@ html[data-nova-motion="off"] *::after {
   white-space: nowrap;
 }
 
+/* 消息元数据行中的 token 统计 / 生成速度（与 .nova-message-time 同款 muted 风格） */
+.nova-message-stat {
+  white-space: nowrap;
+}
+
 .nova-command-menu {
   border-color: var(--nova-border);
   background:

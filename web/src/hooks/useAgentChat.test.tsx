@@ -1,10 +1,12 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { getMessagesPage, getSessions, switchSession, type SessionSummary } from '@/lib/api'
+import { getMessagesPage, getSessions, switchSession, truncateSession, type SessionSummary } from '@/lib/api'
+import { buildAgentMessageViews } from '@/lib/agent-message-view'
 import { useAgentChat } from './useAgentChat'
 
 const chatMock = vi.hoisted(() => ({
   options: null as Record<string, any> | null,
+  messages: [] as any[],
   sendMessage: vi.fn(),
   setMessages: vi.fn(),
   resumeStream: vi.fn(),
@@ -16,7 +18,7 @@ vi.mock('@ai-sdk/react', () => ({
   useChat: (options: Record<string, any>) => {
     chatMock.options = options
     return {
-      messages: [],
+      messages: chatMock.messages,
       setMessages: chatMock.setMessages,
       sendMessage: chatMock.sendMessage,
       resumeStream: chatMock.resumeStream,
@@ -32,11 +34,15 @@ vi.mock('@/lib/api', () => ({
   createSession: vi.fn(),
   deleteSession: vi.fn(),
   executeCommand: vi.fn(),
+  executeTool: vi.fn().mockResolvedValue({ result: '', error: undefined }),
   getActiveChatTask: vi.fn().mockResolvedValue({ active: false }),
+  getCheckpoints: vi.fn().mockResolvedValue([]),
   getMessagesPage: vi.fn().mockResolvedValue({ messages: [], nextBefore: '0', hasMore: false, total: 0 }),
   getSessions: vi.fn().mockResolvedValue([]),
   renameSession: vi.fn(),
+  restoreCheckpoint: vi.fn(),
   switchSession: vi.fn(),
+  truncateSession: vi.fn(),
 }))
 
 vi.mock('@/features/settings/api', () => ({
@@ -47,6 +53,7 @@ describe('useAgentChat', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     chatMock.options = null
+    chatMock.messages = []
     chatMock.status = 'ready'
   })
 
@@ -213,6 +220,89 @@ describe('useAgentChat', () => {
       { id: 'live-message', role: 'assistant', parts: [{ type: 'text', text: '仍在流式输出', state: 'streaming' }] },
     ])
     expect(result.current.hasEarlierMessages).toBe(false)
+  })
+
+  it('startEditTurn 截断到源 user 消息并返回其原文（无 turn_id 写作模式）', async () => {
+    chatMock.messages = [
+      { id: 'm1', role: 'user', parts: [{ type: 'text', text: '第一轮输入' }], metadata: { message_index: 0 } },
+      { id: 'm2', role: 'assistant', parts: [{ type: 'text', text: '第一轮回复' }], metadata: { message_index: 1 } },
+      { id: 'm3', role: 'user', parts: [{ type: 'text', text: '第二轮输入' }], metadata: { message_index: 2 } },
+      { id: 'm4', role: 'assistant', parts: [{ type: 'text', text: '第二轮回复' }], metadata: { message_index: 3 } },
+    ]
+    vi.mocked(switchSession).mockResolvedValue({ id: 's1', title: 's1', active: true, message_count: 4, created_at: '2026-08-08T00:00:00Z', updated_at: '2026-08-08T00:00:00Z' })
+    vi.mocked(getSessions).mockResolvedValue([{ id: 's1', title: 's1', active: true, message_count: 4, created_at: '2026-08-08T00:00:00Z', updated_at: '2026-08-08T00:00:00Z' }])
+    const { result } = renderHook(() => useAgentChat())
+    await act(async () => { result.current.switchChatSession('s1') })
+
+    const views = buildAgentMessageViews(chatMock.messages)
+    const assistantView = views.find((v) => v.messageId === 'm4')!
+    let editResult!: Promise<string | null>
+    act(() => {
+      editResult = result.current.startEditTurn(assistantView)
+    })
+    const content = await act(async () => editResult)
+
+    // 截断到源 user 消息（m3，message_index=2），reason='edit'
+    expect(truncateSession).toHaveBeenCalledWith('s1', 2, 'edit')
+    // 返回源 user 消息原文供 composer 预填
+    expect(content).toBe('第二轮输入')
+    // 本地 UI 截断：保留到 m3（含），移除 m4
+    const updater = chatMock.setMessages.mock.calls.map((c) => c[0]).find((a) => typeof a === 'function')
+    expect(updater).toBeDefined()
+    expect((updater as (all: any[]) => any[])(chatMock.messages).map((m: any) => m.id)).toEqual(['m1', 'm2', 'm3'])
+  })
+
+  it('startEditTurn 对 user 消息本身编辑时以该消息为源（不取上一条 user）', async () => {
+    chatMock.messages = [
+      { id: 'm1', role: 'user', parts: [{ type: 'text', text: '第一轮输入' }], metadata: { message_index: 0 } },
+      { id: 'm2', role: 'assistant', parts: [{ type: 'text', text: '第一轮回复' }], metadata: { message_index: 1 } },
+      { id: 'm3', role: 'user', parts: [{ type: 'text', text: '第二轮输入' }], metadata: { message_index: 2 } },
+    ]
+    vi.mocked(switchSession).mockResolvedValue({ id: 's1', title: 's1', active: true, message_count: 3, created_at: '2026-08-08T00:00:00Z', updated_at: '2026-08-08T00:00:00Z' })
+    vi.mocked(getSessions).mockResolvedValue([{ id: 's1', title: 's1', active: true, message_count: 3, created_at: '2026-08-08T00:00:00Z', updated_at: '2026-08-08T00:00:00Z' }])
+    const { result } = renderHook(() => useAgentChat())
+    await act(async () => { result.current.switchChatSession('s1') })
+
+    const views = buildAgentMessageViews(chatMock.messages)
+    const userView = views.find((v) => v.messageId === 'm3')!
+    let editResult!: Promise<string | null>
+    act(() => {
+      editResult = result.current.startEditTurn(userView)
+    })
+    const content = await act(async () => editResult)
+
+    // user 消息本身就是源：截断到 m3（message_index=2），返回 m3 原文（而非 m1）
+    expect(truncateSession).toHaveBeenCalledWith('s1', 2, 'edit')
+    expect(content).toBe('第二轮输入')
+  })
+
+  it('regenerateMessage 对历史加载消息重试：截断并重发源 user 原文', async () => {
+    chatMock.messages = [
+      { id: 'm1', role: 'user', parts: [{ type: 'text', text: '历史输入' }], metadata: { message_index: 0 } },
+      { id: 'm2', role: 'assistant', parts: [{ type: 'text', text: '历史回复' }], metadata: { message_index: 1 } },
+    ]
+    chatMock.sendMessage.mockResolvedValue(undefined)
+    vi.mocked(switchSession).mockResolvedValue({ id: 's1', title: 's1', active: true, message_count: 2, created_at: '2026-08-08T00:00:00Z', updated_at: '2026-08-08T00:00:00Z' })
+    vi.mocked(getSessions).mockResolvedValue([{ id: 's1', title: 's1', active: true, message_count: 2, created_at: '2026-08-08T00:00:00Z', updated_at: '2026-08-08T00:00:00Z' }])
+    const { result } = renderHook(() => useAgentChat())
+    await act(async () => { result.current.switchChatSession('s1') })
+
+    const views = buildAgentMessageViews(chatMock.messages)
+    const assistantView = views.find((v) => v.messageId === 'm2')!
+    let regenResult!: Promise<boolean>
+    act(() => {
+      regenResult = result.current.regenerateMessage(assistantView)
+    })
+    const ok = await act(async () => regenResult)
+
+    expect(ok).toBe(true)
+    // 截断到源 user 消息（m1，message_index=0），reason='retry'
+    expect(truncateSession).toHaveBeenCalledWith('s1', 0, 'retry')
+    // 重发源 user 原文
+    expect(chatMock.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ parts: [{ type: 'text', text: '历史输入' }] }),
+      expect.any(Object),
+    )
   })
 })
 

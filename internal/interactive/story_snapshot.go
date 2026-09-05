@@ -74,6 +74,19 @@ func snapshotFromLines(storyID, branchID string, meta StoryMeta, lines []StoryEv
 			}
 			snapshot.ContextCompaction = nil
 			snapshot.ContextCompactionRemoval = &removal
+		case StoryEventTypeFold:
+			var fold ContextFoldEvent
+			if err := mapToStruct(record.Raw, &fold); err != nil {
+				return Snapshot{}, err
+			}
+			snapshot.ContextFold = &fold
+		case StoryEventTypeFoldRemoved:
+			var removal ContextFoldRemovalEvent
+			if err := mapToStruct(record.Raw, &removal); err != nil {
+				return Snapshot{}, err
+			}
+			snapshot.ContextFold = nil
+			snapshot.ContextFoldRemoval = &removal
 		}
 	}
 	initializeActors := true

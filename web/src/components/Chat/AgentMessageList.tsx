@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -51,6 +51,7 @@ interface MessageListProps {
   onEditAssistantReply?: (view: AgentMessageView) => void
   onRegenerateMessage?: (view: AgentMessageView) => void
   onSwitchMessageVersion?: (view: AgentMessageView, direction: -1 | 1) => void
+  onRestoreCheckpoint?: (view: AgentMessageView) => void
   onOpenSubAgentSession?: (view: AgentMessageView) => void
   onInsertIllustration?: (illustration: ChapterIllustration) => void
   onGenerateInteractiveImage?: (view: AgentMessageView) => void
@@ -61,6 +62,7 @@ interface MessageListProps {
   onContinuePlan?: (view: AgentMessageView) => void
   onExitPlanMode?: () => void
   onOpenTrace?: (runID: string) => void
+  onRetryTool?: (view: AgentMessageView) => void
   turnScrollRequest?: TurnScrollRequest
   onVisibleTurnAnchorChange?: (anchorId: string) => void
 }
@@ -104,7 +106,7 @@ interface MessageListVirtuosoContext {
   onLoadEarlierMessages?: () => void | Promise<void>
 }
 
-export function MessageList({ messages, isStreaming, activityContent, highlightDialogue = false, scrollResetKey, bottomPaddingClassName = '', bottomPaddingPx, afterContent, hasEarlierMessages = false, isLoadingEarlierMessages = false, onLoadEarlierMessages, timelineAttachments = [], messageStyle, collapseTraceGroups = false, activeTraceDisplay = 'expanded', onEditMessage, onEditAssistantReply, onRegenerateMessage, onSwitchMessageVersion, onOpenSubAgentSession, onInsertIllustration, onGenerateInteractiveImage, generatingInteractiveImageTurnId, activeSubAgentSessionKey, onSubmitPlanQuestion, onApprovePlan, onContinuePlan, onExitPlanMode, onOpenTrace, turnScrollRequest, onVisibleTurnAnchorChange }: MessageListProps) {
+export function MessageList({ messages, isStreaming, activityContent, highlightDialogue = false, scrollResetKey, bottomPaddingClassName = '', bottomPaddingPx, afterContent, hasEarlierMessages = false, isLoadingEarlierMessages = false, onLoadEarlierMessages, timelineAttachments = [], messageStyle, collapseTraceGroups = false, activeTraceDisplay = 'expanded', onEditMessage, onEditAssistantReply, onRegenerateMessage, onSwitchMessageVersion, onRestoreCheckpoint, onOpenSubAgentSession, onInsertIllustration, onGenerateInteractiveImage, generatingInteractiveImageTurnId, activeSubAgentSessionKey, onSubmitPlanQuestion, onApprovePlan, onContinuePlan, onExitPlanMode, onOpenTrace, onRetryTool, turnScrollRequest, onVisibleTurnAnchorChange }: MessageListProps) {
   const { t } = useTranslation()
   const containerRef = useRef<HTMLDivElement | null>(null)
   const lastVisibleTurnAnchorRef = useRef('')
@@ -230,6 +232,7 @@ export function MessageList({ messages, isStreaming, activityContent, highlightD
         onEditAssistantReply={onEditAssistantReply}
         onRegenerateMessage={onRegenerateMessage}
         onSwitchMessageVersion={onSwitchMessageVersion}
+        onRestoreCheckpoint={onRestoreCheckpoint}
         onOpenSubAgentSession={onOpenSubAgentSession}
         onInsertIllustration={onInsertIllustration}
         onGenerateInteractiveImage={onGenerateInteractiveImage}
@@ -240,10 +243,11 @@ export function MessageList({ messages, isStreaming, activityContent, highlightD
         onContinuePlan={onContinuePlan}
         onExitPlanMode={onExitPlanMode}
         onOpenTrace={onOpenTrace}
+        onRetryTool={onRetryTool}
         onPlanCardLayoutChange={anchorLatestPlanCardBottom}
       />
     )
-  }, [activeSubAgentSessionKey, activeTraceDisplay, anchorLatestPlanCardBottom, firstItemIndex, generatingInteractiveImageTurnId, highlightDialogue, isStreaming, listItems, messageStyle, onApprovePlan, onContinuePlan, onEditAssistantReply, onEditMessage, onExitPlanMode, onGenerateInteractiveImage, onInsertIllustration, onOpenSubAgentSession, onOpenTrace, onRegenerateMessage, onSubmitPlanQuestion, onSwitchMessageVersion])
+  }, [activeSubAgentSessionKey, activeTraceDisplay, anchorLatestPlanCardBottom, firstItemIndex, generatingInteractiveImageTurnId, highlightDialogue, isStreaming, listItems, messageStyle, onApprovePlan, onContinuePlan, onEditAssistantReply, onEditMessage, onExitPlanMode, onGenerateInteractiveImage, onInsertIllustration, onOpenSubAgentSession, onOpenTrace, onRegenerateMessage, onRestoreCheckpoint, onRetryTool, onSubmitPlanQuestion, onSwitchMessageVersion])
 
   return (
     <div ref={containerRef} className="relative flex min-h-0 flex-1 flex-col">
@@ -353,7 +357,7 @@ function MessageListFooter({ context }: ContextProp<MessageListVirtuosoContext>)
   )
 }
 
-function AgentChatListRow({ item, isLast, isStreaming, activeTraceDisplay, highlightDialogue, messageStyle, onEditMessage, onEditAssistantReply, onRegenerateMessage, onSwitchMessageVersion, onOpenSubAgentSession, onInsertIllustration, onGenerateInteractiveImage, generatingInteractiveImageTurnId, activeSubAgentSessionKey, onSubmitPlanQuestion, onApprovePlan, onContinuePlan, onExitPlanMode, onOpenTrace, onPlanCardLayoutChange }: {
+interface AgentChatListRowProps {
   item: AgentChatListItem
   isLast: boolean
   isStreaming: boolean
@@ -364,6 +368,7 @@ function AgentChatListRow({ item, isLast, isStreaming, activeTraceDisplay, highl
   onEditAssistantReply?: (view: AgentMessageView) => void
   onRegenerateMessage?: (view: AgentMessageView) => void
   onSwitchMessageVersion?: (view: AgentMessageView, direction: -1 | 1) => void
+  onRestoreCheckpoint?: (view: AgentMessageView) => void
   onOpenSubAgentSession?: (view: AgentMessageView) => void
   onInsertIllustration?: (illustration: ChapterIllustration) => void
   onGenerateInteractiveImage?: (view: AgentMessageView) => void
@@ -374,8 +379,57 @@ function AgentChatListRow({ item, isLast, isStreaming, activeTraceDisplay, highl
   onContinuePlan?: (view: AgentMessageView) => void
   onExitPlanMode?: () => void
   onOpenTrace?: (runID: string) => void
+  onRetryTool?: (view: AgentMessageView) => void
   onPlanCardLayoutChange?: () => void
-}) {
+}
+
+/**
+ * T3 流式渲染优化：自定义比较器，避免每帧 SSE chunk 导致所有可见行重渲染。
+ * 已完成消息的 view 引用稳定（WeakMap 缓存），仅流式消息的 view 每帧变化。
+ * 比较 item.key + 底层数据引用（view/views[0]/message），跳过未变化行的重渲染。
+ */
+function areAgentChatListRowsEqual(prev: AgentChatListRowProps, next: AgentChatListRowProps): boolean {
+  if (prev.isLast !== next.isLast) return false
+  if (prev.isStreaming !== next.isStreaming) return false
+  if (prev.activeTraceDisplay !== next.activeTraceDisplay) return false
+  if (prev.highlightDialogue !== next.highlightDialogue) return false
+  if (prev.messageStyle !== next.messageStyle) return false
+  if (prev.activeSubAgentSessionKey !== next.activeSubAgentSessionKey) return false
+  if (prev.generatingInteractiveImageTurnId !== next.generatingInteractiveImageTurnId) return false
+
+  const prevItem = prev.item
+  const nextItem = next.item
+  if (prevItem.key !== nextItem.key) return false
+  if (prevItem.kind !== nextItem.kind) return false
+
+  // 比较底层数据引用：已完成消息的 view 引用稳定，流式消息的 view 每帧变化。
+  // 注意：switch 只收窄 prevItem，nextItem 需在同分支内显式校验 kind 后才可安全访问其字段。
+  switch (prevItem.kind) {
+    case 'message':
+      return nextItem.kind === 'message' && prevItem.view === nextItem.view
+    case 'trace': {
+      // trace 的 views 数组每帧重建，但已完成 view 引用稳定（WeakMap 缓存）。
+      // 流式 view 在组末尾，引用每帧变化。逐元素比较引用 + 长度 + activeStreamingTrace。
+      if (nextItem.kind !== 'trace') return false
+      if (prevItem.views.length !== nextItem.views.length) return false
+      if (prevItem.activeStreamingTrace !== nextItem.activeStreamingTrace) return false
+      for (let i = 0; i < prevItem.views.length; i++) {
+        if (prevItem.views[i] !== nextItem.views[i]) return false
+      }
+      return true
+    }
+    case 'legacy-message':
+      return nextItem.kind === 'legacy-message' && prevItem.message === nextItem.message
+    case 'activity':
+      // activity 内容随流式变化，需比较 content
+      return nextItem.kind === 'activity' && prevItem.content === nextItem.content
+    default:
+      // typing/clear/attachment/empty：key 相同即视为未变化
+      return true
+  }
+}
+
+const AgentChatListRow = memo(function AgentChatListRow({ item, isLast, isStreaming, activeTraceDisplay, highlightDialogue, messageStyle, onEditMessage, onEditAssistantReply, onRegenerateMessage, onSwitchMessageVersion, onRestoreCheckpoint, onOpenSubAgentSession, onInsertIllustration, onGenerateInteractiveImage, generatingInteractiveImageTurnId, activeSubAgentSessionKey, onSubmitPlanQuestion, onApprovePlan, onContinuePlan, onExitPlanMode, onOpenTrace, onRetryTool, onPlanCardLayoutChange }: AgentChatListRowProps) {
   const { t } = useTranslation()
   const turnAnchor = chatListItemNavigationAnchor(item)
 
@@ -424,6 +478,7 @@ function AgentChatListRow({ item, isLast, isStreaming, activeTraceDisplay, highl
           message={item.message}
           highlightDialogue={highlightDialogue}
           messageStyle={messageStyle}
+          onRegenerate={onRegenerateMessage && item.openView ? () => onRegenerateMessage(item.openView as AgentMessageView) : undefined}
           onOpenSubAgentSession={item.openView && onOpenSubAgentSession ? () => onOpenSubAgentSession(item.openView as AgentMessageView) : undefined}
           activeSubAgentSessionKey={activeSubAgentSessionKey}
           onOpenTrace={onOpenTrace}
@@ -437,6 +492,7 @@ function AgentChatListRow({ item, isLast, isStreaming, activeTraceDisplay, highl
           onEditAssistantReply={isStreaming ? undefined : onEditAssistantReply}
           onRegenerateMessage={isStreaming ? undefined : onRegenerateMessage}
           onSwitchMessageVersion={isStreaming ? undefined : onSwitchMessageVersion}
+          onRestoreCheckpoint={isStreaming ? undefined : onRestoreCheckpoint}
           onOpenSubAgentSession={onOpenSubAgentSession}
           onInsertIllustration={onInsertIllustration}
           onGenerateInteractiveImage={isStreaming ? undefined : onGenerateInteractiveImage}
@@ -447,12 +503,13 @@ function AgentChatListRow({ item, isLast, isStreaming, activeTraceDisplay, highl
           onContinuePlan={isStreaming ? undefined : onContinuePlan}
           onExitPlanMode={isStreaming ? undefined : onExitPlanMode}
           onOpenTrace={onOpenTrace}
+          onRetryTool={isStreaming ? undefined : onRetryTool}
           onPlanCardLayoutChange={onPlanCardLayoutChange}
         />
       )}
     </motion.div>
   )
-}
+}, areAgentChatListRowsEqual)
 
 function buildAgentChatListItems({ views, isStreaming, visibleActivityContent, collapseTraceGroups, groupSubAgentTimeline, timelineAttachments }: { views: AgentMessageView[]; isStreaming: boolean; visibleActivityContent: string; collapseTraceGroups: boolean; groupSubAgentTimeline: boolean; timelineAttachments: AgentTimelineAttachment[] }): AgentChatListItem[] {
   const items: AgentChatListItem[] = []

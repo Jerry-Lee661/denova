@@ -445,6 +445,36 @@ func (h *Handlers) HandleInteractiveContextCompactionRemove(ctx context.Context,
 	writeJSON(c, consts.StatusOK, map[string]bool{"removed": removed})
 }
 
+func (h *Handlers) HandleInteractiveContextFold(ctx context.Context, c *app.RequestContext) {
+	var body struct {
+		BranchID string `json:"branch_id"`
+		Branch   string `json:"branch"`
+	}
+	if err := c.BindJSON(&body); err != nil && len(c.Request.Body()) > 0 {
+		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
+		return
+	}
+	branchID := body.BranchID
+	if strings.TrimSpace(branchID) == "" {
+		branchID = body.Branch
+	}
+	result, err := h.app.FoldInteractiveContext(ctx, c.Param("id"), branchID)
+	if err != nil {
+		writeError(c, consts.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(c, consts.StatusOK, result)
+}
+
+func (h *Handlers) HandleInteractiveContextFoldRemove(ctx context.Context, c *app.RequestContext) {
+	removed, err := h.app.RemoveInteractiveContextFold(c.Param("id"), c.Query("branch"))
+	if err != nil {
+		writeError(c, consts.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(c, consts.StatusOK, map[string]bool{"removed": removed})
+}
+
 func (h *Handlers) HandleInteractiveChatAbort(ctx context.Context, c *app.RequestContext) {
 	if task := h.app.ActiveInteractiveTask(); task != nil {
 		log.Printf("[interactive-agent-sse] abort requested task_id=%s status=%s", task.ID(), task.Status())

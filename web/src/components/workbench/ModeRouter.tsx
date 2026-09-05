@@ -14,10 +14,11 @@ import { useInteractiveStore } from '@/features/interactive/stores/interactive-s
 import type { ImagePreset, Teller } from '@/features/interactive/types'
 import type { FileNode } from '@/hooks/useWorkspace'
 import type { BookRecord, BookSortMode, ChapterIllustration, ChapterSummary, ContextAnalysis, DocumentPreview, LoreItem, SessionSummary, TextSelection, WorkspaceSearchResult, WorkspaceSummary } from '@/lib/api'
+import type { Checkpoint } from '@/lib/api-client/types'
 import type { AgentUIMessage } from '@/lib/agent-ui'
 import type { ChatSendOptions } from '@/hooks/useAgentChat'
 import { usePersistedUserSettings } from '@/hooks/usePersistedUserSettings'
-import type { AgentPartRef } from '@/lib/agent-message-view'
+import type { AgentMessageView, AgentPartRef } from '@/lib/agent-message-view'
 import type { RightPanel, WorkspaceMode } from '@/stores/workspace-store'
 import { workspaceFileKind } from '@/lib/workspace-file-kind'
 import { useWritingChangeReview } from '@/features/changes/use-writing-change-review'
@@ -39,7 +40,8 @@ const AgentsView = lazy(() => import('@/features/agents/AgentsView').then((modul
 const AutomationsView = lazy(() => import('@/features/automations/AutomationsView').then((module) => ({ default: module.AutomationsView })))
 const SkillsView = lazy(() => import('@/features/skills/SkillsView').then((module) => ({ default: module.SkillsView })))
 const SettingsView = lazy(() => import('@/features/settings/SettingsView').then((module) => ({ default: module.SettingsView })))
-type MainRouteId = 'settings' | 'skills' | 'agents' | 'automations' | 'books' | 'interactive' | 'versions' | 'ide-lore' | 'ide-teller' | 'ide-writing'
+const ImageAnalysisView = lazy(() => import('@/components/ImageAnalysis/ImageAnalysisPanel').then((module) => ({ default: module.ImageAnalysisPanel })))
+type MainRouteId = 'settings' | 'skills' | 'agents' | 'automations' | 'books' | 'interactive' | 'versions' | 'ide-lore' | 'ide-teller' | 'ide-writing' | 'image-analysis'
 type PlanningDocumentIcon = 'ideas' | 'outline' | 'plan' | 'creator' | 'progress' | 'characterState'
 
 interface ModeRouterProps {
@@ -74,6 +76,7 @@ interface ModeRouterProps {
   editorAutoSaveDelayMs: number
   versionRefreshSignal: number
   messages: AgentUIMessage[]
+  checkpoints: Checkpoint[]
   sessions: SessionSummary[]
   activeSessionId: string
   activityContent: string
@@ -120,6 +123,10 @@ interface ModeRouterProps {
   onDeleteChatSession: (id: string) => void | Promise<void>
   onLoadEarlierHistory: () => void | Promise<void>
   onSend: (message: string, options?: ChatSendOptions) => boolean | Promise<boolean>
+  onRegenerateMessage?: (view: AgentMessageView) => void
+  onStartEditTurn?: (view: AgentMessageView) => Promise<string | null>
+  onRetryTool?: (view: AgentMessageView) => void
+  onRestoreCheckpoint?: (checkpointId: string) => void
   onAnalyzeContext: (message: string, options?: { writingSkill?: string; ideContext?: { currentFile?: string; openFiles?: string[] }; imagePresetId?: string; tellerId?: string }) => Promise<ContextAnalysis>
   onStop: () => void
   onReferenceRemove: (path: string) => void
@@ -170,6 +177,7 @@ export function ModeRouter(props: ModeRouterProps) {
     editorAutoSaveDelayMs,
     versionRefreshSignal,
     messages,
+    checkpoints,
     sessions,
     activeSessionId,
     activityContent,
@@ -216,6 +224,10 @@ export function ModeRouter(props: ModeRouterProps) {
     onDeleteChatSession,
     onLoadEarlierHistory,
     onSend,
+    onRegenerateMessage,
+    onStartEditTurn,
+    onRetryTool,
+    onRestoreCheckpoint,
     onAnalyzeContext,
     onStop,
     onReferenceRemove,
@@ -487,15 +499,17 @@ export function ModeRouter(props: ModeRouterProps) {
         ? 'agents'
         : automationsVisible
           ? 'automations'
-          : mode === 'books'
-            ? 'books'
-            : versionsVisible
-              ? 'versions'
-              : mode === 'interactive'
-                ? 'interactive'
-                : ideWorkspacePanel
-                  ? `ide-${ideWorkspacePanel}`
-                  : 'ide-writing'
+          : mode === 'image-analysis'
+            ? 'image-analysis'
+            : mode === 'books'
+              ? 'books'
+              : versionsVisible
+                ? 'versions'
+                : mode === 'interactive'
+                  ? 'interactive'
+                  : ideWorkspacePanel
+                    ? `ide-${ideWorkspacePanel}`
+                    : 'ide-writing'
   const [mountedRoutes, setMountedRoutes] = useState<ReadonlySet<MainRouteId>>(() => new Set(['ide-writing', visibleMainRoute]))
 
   useEffect(() => {
@@ -728,6 +742,11 @@ export function ModeRouter(props: ModeRouterProps) {
           <AutomationsView workspace={workspace} onClose={() => onSetMode(booksReturnMode)} />
         </MainRouteLayer>
       )}
+      {mountedRoutes.has('image-analysis') && (
+        <MainRouteLayer visible={visibleMainRoute === 'image-analysis'}>
+          <ImageAnalysisView />
+        </MainRouteLayer>
+      )}
       {mountedRoutes.has('settings') && (
         <MainRouteLayer visible={visibleMainRoute === 'settings'}>
           <SettingsView onClose={onCloseSettings} />
@@ -746,6 +765,7 @@ export function ModeRouter(props: ModeRouterProps) {
       tellers={tellers}
       imagePresets={imagePresets}
       messages={messages}
+      checkpoints={checkpoints}
       sessions={sessions}
       activeSessionId={activeSessionId}
       isStreaming={isStreaming}
@@ -766,6 +786,10 @@ export function ModeRouter(props: ModeRouterProps) {
       onDeleteSession={onDeleteChatSession}
       onLoadEarlierHistory={onLoadEarlierHistory}
       onSend={onSend}
+      onRegenerateMessage={onRegenerateMessage}
+      onStartEditTurn={onStartEditTurn}
+      onRetryTool={onRetryTool}
+      onRestoreCheckpoint={onRestoreCheckpoint}
       onAnalyzeContext={onAnalyzeContext}
       ideContext={ideContext}
       onStop={onStop}

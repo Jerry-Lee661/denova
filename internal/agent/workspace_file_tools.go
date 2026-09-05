@@ -72,7 +72,16 @@ func newWorkspaceEditFileTool(changes workspaceChangeService) (tool.BaseTool, er
 		return nil, err
 	}
 	return utils.InferTool("edit_file", workspaceEditFileToolDescription, func(ctx context.Context, input workspaceEditFileInput) (string, error) {
-		baseRevision, err := currentWorkspaceBaseRevision(changes, input.FilePath)
+		path, err := resolveWriteFilePath(workspace, input.FilePath)
+		if err != nil {
+			return "", err
+		}
+		// 写参数体积准入：限制单次 edits 数量与新增总量，避免模型在超长上下文里
+		// 生成超长结构化输出（本地模型会因 KV+解码缓冲内存不足而 OOM）。
+		if msg, ok := editFileInjectionAdmission(input); ok {
+			return msg, nil
+		}
+		baseRevision, err := currentWorkspaceBaseRevision(changes, path)
 		if err != nil {
 			return "", err
 		}
@@ -86,7 +95,7 @@ func newWorkspaceEditFileTool(changes workspaceChangeService) (tool.BaseTool, er
 			})
 		}
 		changeSet, err := changes.ApplyEdits(ctx, workspacechange.ApplyEditsRequest{
-			Path:         input.FilePath,
+			Path:         path,
 			BaseRevision: baseRevision,
 			Edits:        edits,
 			Metadata:     workspaceChangeMetadata(ctx),
@@ -107,12 +116,16 @@ func newWorkspaceWriteFileTool(changes workspaceChangeService) (tool.BaseTool, e
 		return nil, err
 	}
 	return utils.InferTool("write_file", workspaceWriteFileToolDescription, func(ctx context.Context, input workspaceWriteFileInput) (string, error) {
-		baseRevision, err := currentWorkspaceBaseRevisionOrMissing(changes, input.FilePath)
+		path, err := resolveWriteFilePath(workspace, input.FilePath)
+		if err != nil {
+			return "", err
+		}
+		baseRevision, err := currentWorkspaceBaseRevisionOrMissing(changes, path)
 		if err != nil {
 			return "", err
 		}
 		changeSet, err := changes.ReplaceFile(ctx, workspacechange.ReplaceFileRequest{
-			Path:         input.FilePath,
+			Path:         path,
 			Content:      input.Content,
 			BaseRevision: baseRevision,
 			Metadata:     workspaceChangeMetadata(ctx),
@@ -133,6 +146,51 @@ func canonicalChangeWorkspace(changes workspaceChangeService) (string, error) {
 		return "", fmt.Errorf("workspace change service path is not absolute: %s", workspace)
 	}
 	return filepath.Clean(workspace), nil
+}
+
+// maxEditFileEdits 限制单次 edit_file 的 edits 数量；maxEditTotalNewStringBytes 限制
+// 新增内容总字节。避免模型在超长上下文里生成超长结构化输出（本地模型 OOM 的直接触发点）。
+const (
+	maxEditFileEdits           = 6
+	maxEditTotalNewStringBytes = 8192
+)
+
+// editFileInjectionAdmission 检查 edit_file 参数体积，超限返回引导消息（不放行），
+// 未超限返回空串。写操作不做模糊匹配，只做体积准入（安全：宁可不做也不写错）。
+func editFileInjectionAdmission(input workspaceEditFileInput) (string, bool) {
+	if len(input.Edits) > maxEditFileEdits {
+		return fmt.Sprintf(`[tool error]
+type: write_parameter_too_large
+tool: edit_file
+retryable: false
+workspace_mutated: false
+中文：单次 edit_file 最多 %d 处修改，本次 %d 处。请拆小：一次只改需要的片段（≤%d 处），或大范围重写改用 write_file 全量重写，避免生成超大工具输出导致模型 OOM。
+English: edit_file accepts at most %d edits per call, got %d. Split into smaller calls (≤%d edits), or use write_file for a full rewrite; oversized tool output can OOM local models.`,
+			maxEditFileEdits, len(input.Edits), maxEditFileEdits,
+			maxEditFileEdits, len(input.Edits), maxEditFileEdits), true
+	}
+	total := 0
+	for _, e := range input.Edits {
+		total += len(e.NewString)
+	}
+	if total > maxEditTotalNewStringBytes {
+		return fmt.Sprintf(`[tool error]
+type: write_parameter_too_large
+tool: edit_file
+retryable: false
+workspace_mutated: false
+中文：本次 edit_file 新增内容共 %d 字节，超过 %d 上限。请拆小：一次只改局部片段，或大范围重写改用 write_file 全量重写，避免生成超大工具输出导致模型 OOM。
+English: edit_file new content totals %d bytes, exceeding the %d limit. Split into smaller local edits, or use write_file for a full rewrite; oversized tool output can OOM local models.`,
+			total, maxEditTotalNewStringBytes,
+			total, maxEditTotalNewStringBytes), true
+	}
+	return "", false
+}
+
+// resolveWriteFilePath 解析写/编辑工具的文件路径：支持 @ 别名（@chN 等），
+// 不支持的输入原样返回。写操作只做别名解析，不做模糊匹配（避免写错文件）。
+func resolveWriteFilePath(workspace, input string) (string, error) {
+	return resolveFileAliasInput(workspace, input)
 }
 
 func currentWorkspaceBaseRevision(changes workspaceChangeService, path string) (string, error) {

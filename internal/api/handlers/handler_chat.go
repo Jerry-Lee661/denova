@@ -63,6 +63,33 @@ func (h *Handlers) HandleChatContextAnalysis(ctx context.Context, c *app.Request
 	c.JSON(consts.StatusOK, analysis)
 }
 
+// HandleToolExecute 按工具名重建并同步执行单个工具，返回 { result, error }。
+// 供前端工具卡片「重试」按钮调用，复用与主 Agent 一致的工具装配路径。
+func (h *Handlers) HandleToolExecute(ctx context.Context, c *app.RequestContext) {
+	if !h.requireWorkspace(c) {
+		return
+	}
+	var req struct {
+		Name string `json:"name"`
+		Args string `json:"args"`
+	}
+	if err := c.BindJSON(&req); err != nil {
+		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidBody")
+		return
+	}
+	if strings.TrimSpace(req.Name) == "" {
+		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidBody")
+		return
+	}
+	result, err := h.app.ExecuteTool(ctx, req.Name, req.Args)
+	if err != nil {
+		// 工具执行失败也返回 200 + error 字段，让前端把错误展示在卡片上。
+		c.JSON(consts.StatusOK, map[string]any{"result": "", "error": err.Error()})
+		return
+	}
+	c.JSON(consts.StatusOK, map[string]any{"result": result, "error": ""})
+}
+
 func (h *Handlers) writeChatPreparationError(c *app.RequestContext, err error) {
 	if errors.Is(err, novaApp.ErrNoWorkspace) {
 		writeErrorKey(c, consts.StatusConflict, "api.workspace.noWorkspace")

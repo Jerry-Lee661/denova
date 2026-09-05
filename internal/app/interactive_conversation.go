@@ -196,6 +196,24 @@ func (c *interactiveConversation) directorTaskHint() string {
 	}
 }
 
+func (c *interactiveConversation) RuntimeState() session.RuntimeState {
+	if c == nil {
+		return session.RuntimeState{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	state := session.RuntimeState{
+		AgentKind: config.AgentKindInteractiveStory,
+		Mode:      "interactive",
+		StoryID:   strings.TrimSpace(c.storyID),
+		BranchID:  strings.TrimSpace(c.branchID),
+	}
+	if c.lastTurn != nil && strings.TrimSpace(c.lastTurn.BranchID) != "" {
+		state.BranchID = strings.TrimSpace(c.lastTurn.BranchID)
+	}
+	return state
+}
+
 func (c *interactiveConversation) PrepareMessages(originalMessage, agentMessage string) ([]*schema.Message, error) {
 	_ = originalMessage
 	if c == nil || c.store == nil {
@@ -208,10 +226,16 @@ func (c *interactiveConversation) PrepareMessages(originalMessage, agentMessage 
 	teller := c.teller(storyCtx.Meta.StoryTellerID)
 	storyDirector := storyDirectorForSnapshot(c.storyDirectorForMeta(storyCtx.Meta), storyCtx.Meta.ActorStateSchema)
 	tellerTurnContextPrompt := teller.PromptForTargets("turn_context")
+	// Fold and full compaction manage the same "old history projection"; prefer an
+	// active compaction so they never overlap. When only a fold is active, rebuild
+	// the model-visible turn history from the fold record instead.
 	turnHistory := buildInteractiveModelVisibleTurnHistory(storyCtx.Snapshot.Turns, storyCtx.Snapshot.ContextCompaction)
 	checkpointSummary := ""
 	if storyCtx.Snapshot.ContextCompaction != nil {
 		checkpointSummary = strings.TrimSpace(storyCtx.Snapshot.ContextCompaction.Summary)
+	} else if fold := storyCtx.Snapshot.ContextFold; fold != nil && strings.TrimSpace(fold.Summary) != "" {
+		turnHistory = buildInteractiveModelVisibleTurnHistoryWithFold(storyCtx.Snapshot.Turns, fold)
+		checkpointSummary = fold.Summary
 	}
 	directorPlanVisible := ""
 	directorPlan := interactive.DirectorPlan{}
@@ -273,6 +297,8 @@ func (c *interactiveConversation) PrepareMessages(originalMessage, agentMessage 
 	}
 	if storyCtx.Snapshot.ContextCompaction != nil && strings.TrimSpace(storyCtx.Snapshot.ContextCompaction.Summary) != "" {
 		history = append(history, agent.NewContextCompactionSummaryMessage(storyCtx.Snapshot.ContextCompaction.Epoch, storyCtx.Snapshot.ContextCompaction.Summary))
+	} else if fold := storyCtx.Snapshot.ContextFold; fold != nil && strings.TrimSpace(fold.Summary) != "" {
+		history = append(history, agent.NewContextFoldSummaryMessage(fold.Summary))
 	}
 	for _, turn := range turnHistory.Turns {
 		history = append(history, schema.UserMessage(turn.User))
@@ -506,6 +532,88 @@ func (c *interactiveConversation) CompactContextIfNeeded(ctx context.Context, in
 		newMessages = preserveInteractiveStableLeadingMessage(newMessages, stableLeadingMessage)
 		result = interactiveCompactionResultForMessages(result, newMessages, input.Tools)
 	}
+	return newMessages, result, nil
+}
+
+// FoldContextIfNeeded folds the incremental source (turns after the last
+// compaction/fold) into a summary placeholder without creating a new boundary or
+// deleting raw turns. It is mutually exclusive with full compaction: when a
+// compaction is active the fold is skipped so both mechanisms do not manage the
+// same projection. The fold event is persisted so the projection survives
+// reload; on reload the interactive conversation re-applies the active fold.
+func (c *interactiveConversation) FoldContextIfNeeded(ctx context.Context, input agent.ContextCompactionInput) ([]*schema.Message, agent.ContextFoldResult, error) {
+	if c == nil || c.store == nil {
+		return input.Messages, agent.ContextFoldResult{}, fmt.Errorf("互动故事不存在")
+	}
+	storyCtx, err := c.store.StoryContext(c.storyID, c.branchID)
+	if err != nil {
+		return input.Messages, agent.ContextFoldResult{}, err
+	}
+	// Fold and full compaction manage the same "old history projection"; prefer
+	// an active compaction so they never overlap.
+	if !input.Force && storyCtx.Snapshot.ContextCompaction != nil && strings.TrimSpace(storyCtx.Snapshot.ContextCompaction.Summary) != "" {
+		return input.Messages, agent.ContextFoldResult{SkippedReason: "compaction_active"}, nil
+	}
+	turns := storyCtx.Snapshot.Turns
+	sourceStart := 0
+	if compaction := storyCtx.Snapshot.ContextCompaction; compaction != nil && compaction.SourceTurnCount > sourceStart {
+		sourceStart = compaction.SourceTurnCount
+	}
+	if fold := storyCtx.Snapshot.ContextFold; fold != nil && fold.SourceTurnCount > sourceStart {
+		sourceStart = fold.SourceTurnCount
+	}
+	if sourceStart > len(turns) {
+		sourceStart = len(turns)
+	}
+	source := interactiveCompactionTurnMessages(turns[sourceStart:])
+	source = agent.ApplyToolResultContextPolicyForConversation(source, c.ToolResultContextPolicy())
+	if len(source) == 0 && strings.TrimSpace(input.ReferenceContext) == "" {
+		return input.Messages, agent.ContextFoldResult{SkippedReason: "empty_source"}, nil
+	}
+	phase := strings.TrimSpace(input.Phase)
+	if phase == "" {
+		phase = agent.FoldPhasePreRun()
+	}
+	retainedTurns := agent.PolicyRetainedTurns(c.cfg, config.AgentKindInteractiveStory)
+	result := agent.ContextFoldResult{
+		Phase:              phase,
+		MessageCountBefore: len(input.Messages),
+		RetainedTurns:      retainedTurns,
+	}
+	agent.FoldEmit(input.Emit, phase, "started", result)
+	newMessages, foldResult, err := agent.AgentFoldContext(ctx, c.cfg, config.AgentKindInteractiveStory, agent.ContextCompactionInput{
+		Messages:         input.Messages,
+		Tools:            input.Tools,
+		Phase:            phase,
+		Emit:             input.Emit,
+		Force:            input.Force,
+		ReferenceContext: input.ReferenceContext,
+	}, sourceStart, len(turns), phase)
+	if err != nil {
+		agent.FoldEmit(input.Emit, phase, "failed", foldResult)
+		return input.Messages, foldResult, err
+	}
+	event := interactive.ContextFoldEvent{
+		AgentKind:       config.AgentKindInteractiveStory,
+		Summary:         foldResult.Summary,
+		SourceTurnCount: sourceStart,
+		RetainedTurns:   foldResult.RetainedTurns,
+		TokensBefore:    foldResult.TokensBefore,
+		TokensAfter:     foldResult.TokensAfter,
+		Reason:          agent.FoldReasonLimit(),
+		Phase:           phase,
+	}
+	event, err = c.store.AppendContextFold(c.storyID, storyCtx.Snapshot.BranchID, event)
+	if err != nil {
+		agent.FoldEmit(input.Emit, phase, "failed", foldResult)
+		return input.Messages, foldResult, err
+	}
+	result.Triggered = true
+	result.Summary = foldResult.Summary
+	result.SourceMessageCount = foldResult.SourceMessageCount
+	result.MessageCountAfter = len(newMessages)
+	result.TokensAfter = agent.EstimateContextTokens(newMessages, input.Tools)
+	agent.FoldEmit(input.Emit, phase, "completed", result)
 	return newMessages, result, nil
 }
 
@@ -1502,6 +1610,41 @@ func buildInteractiveTurnHistory(turns []interactive.TurnEvent) interactiveTurnH
 
 func buildInteractiveModelVisibleTurnHistory(turns []interactive.TurnEvent, compaction *interactive.ContextCompactionEvent) interactiveTurnHistory {
 	return buildInteractiveTurnHistoryWithCompaction(turns, compaction, retainedTurnsForInteractiveCompaction(compaction))
+}
+
+// buildInteractiveModelVisibleTurnHistoryWithFold rebuilds the model-visible turn
+// history after a context fold: turns before the fold interval are omitted, the
+// fold tail is retained as raw turns, and turns after the fold are kept. This
+// mirrors the session-mode fold projection but operates on interactive turns.
+func buildInteractiveModelVisibleTurnHistoryWithFold(turns []interactive.TurnEvent, fold *interactive.ContextFoldEvent) interactiveTurnHistory {
+	retained := fold.RetainedTurns
+	if retained <= 0 {
+		retained = config.DefaultContextCompactionRetainedTurns
+	}
+	if retained > config.MaxContextCompactionRetainedTurns {
+		retained = config.MaxContextCompactionRetainedTurns
+	}
+	sourceCount := fold.SourceTurnCount
+	if sourceCount < 0 {
+		sourceCount = 0
+	}
+	if sourceCount > len(turns) {
+		sourceCount = len(turns)
+	}
+	sourceTail := append([]interactive.TurnEvent(nil), turns[:sourceCount]...)
+	if len(sourceTail) > retained {
+		sourceTail = sourceTail[len(sourceTail)-retained:]
+	}
+	appended := append([]interactive.TurnEvent(nil), turns[sourceCount:]...)
+	retainedTurns := make([]interactive.TurnEvent, 0, len(sourceTail)+len(appended))
+	retainedTurns = append(retainedTurns, sourceTail...)
+	retainedTurns = append(retainedTurns, appended...)
+	return interactiveTurnHistory{
+		PreviousSummary: "",
+		Turns:           retainedTurns,
+		PreviousCount:   sourceCount,
+		OmittedCount:    sourceCount,
+	}
 }
 
 func retainedTurnsForInteractiveCompaction(compaction *interactive.ContextCompactionEvent) int {

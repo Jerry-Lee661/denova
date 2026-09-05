@@ -37,6 +37,13 @@ func (a *App) Workspace() string {
 	return a.runtime().Workspace()
 }
 
+// Config 返回当前运行时配置（只读用途，如 handler 读取 PDF 渲染参数）。
+func (a *App) Config() *config.Config {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.cfg
+}
+
 func (s *WorkspaceRuntimeManager) Workspace() string {
 	a := s.app
 	a.mu.RLock()

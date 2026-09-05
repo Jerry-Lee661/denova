@@ -6,6 +6,11 @@ FRONTEND_BIND_HOST="${DENOVA_FRONTEND_HOST:-${NOVA_FRONTEND_HOST:-}}"
 
 cd "${ROOT_DIR}"
 
+# Git Bash launched from Conda may omit the standard Windows Node.js path.
+if ! command -v node >/dev/null 2>&1 && [ -x "/c/Program Files/nodejs/node.exe" ]; then
+    export PATH="/c/Program Files/nodejs:${PATH}"
+fi
+
 read_config_value() {
     local path="$1"
     local key="$2"

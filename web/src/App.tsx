@@ -182,6 +182,11 @@ function App() {
     switchChatSession,
     renameChatSession,
     deleteChatSession,
+    regenerateMessage,
+    startEditTurn,
+    retryTool,
+    restoreCheckpoint,
+    checkpoints,
     addReference,
     removeReference,
     loreReferences,
@@ -767,6 +772,7 @@ function App() {
         editorAutoSaveDelayMs={editorAutoSaveDelayMs}
         versionRefreshSignal={versionRefreshSignal}
         messages={messages}
+        checkpoints={checkpoints}
         sessions={sessions}
         activeSessionId={activeSessionId}
         activityContent={activityContent}
@@ -814,6 +820,10 @@ function App() {
         onDeleteChatSession={deleteChatSession}
         onLoadEarlierHistory={loadEarlierHistory}
         onSend={send}
+        onRegenerateMessage={regenerateMessage}
+        onStartEditTurn={startEditTurn}
+        onRetryTool={retryTool}
+        onRestoreCheckpoint={restoreCheckpoint}
         onAnalyzeContext={analyzeContext}
         onStop={stop}
         onReferenceRemove={removeReference}

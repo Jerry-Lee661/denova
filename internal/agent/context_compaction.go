@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -74,6 +75,13 @@ type ContextCompactionConversation interface {
 	CompactContextIfNeeded(ctx context.Context, input ContextCompactionInput) ([]*schema.Message, ContextCompactionResult, error)
 }
 
+// FoldConversation is implemented by conversations that can fold the incremental
+// source into a summary placeholder without creating a new boundary or deleting
+// raw history. It is mutually exclusive with full compaction.
+type FoldConversation interface {
+	FoldContextIfNeeded(ctx context.Context, input ContextCompactionInput) ([]*schema.Message, ContextFoldResult, error)
+}
+
 type ContextCompactionInput struct {
 	Messages            []*schema.Message
 	SourceMessages      []*schema.Message
@@ -97,6 +105,30 @@ type contextCompactionContextKey struct{}
 
 var summarizeContextForCompaction contextCompactionSummaryFunc = generateContextCompactionSummary
 
+// SummarizeContextForCompactionForTest returns the current summarize function so
+// tests can capture and restore it. It is exported only to allow cross-package
+// test stubbing of the LLM-backed summarizer.
+func SummarizeContextForCompactionForTest() contextCompactionSummaryFunc {
+	return summarizeContextForCompaction
+}
+
+// RestoreSummarizeContextForCompactionForTest restores a previously captured
+// summarize function. It is exported only for test use.
+func RestoreSummarizeContextForCompactionForTest(fn contextCompactionSummaryFunc) {
+	summarizeContextForCompaction = fn
+}
+
+// StubSummarizeContextForCompactionForTest installs a summarize function that
+// always returns the given summary with the reported input character count. It
+// is exported only for cross-package test stubbing.
+func StubSummarizeContextForCompactionForTest(summary string, inputChars int) func() {
+	previous := summarizeContextForCompaction
+	summarizeContextForCompaction = func(_ context.Context, _ *config.Config, _ string, _ string, source []*schema.Message, _ string, _ int, _ contextCompactionPolicy, _ func(int, string)) (string, int, error) {
+		return summary, inputChars, nil
+	}
+	return func() { summarizeContextForCompaction = previous }
+}
+
 func contextWithCompactionController(ctx context.Context, conversation Conversation) context.Context {
 	compaction, ok := conversation.(ContextCompactionConversation)
 	if !ok || compaction == nil {
@@ -114,11 +146,17 @@ func resolveContextCompactionPolicy(cfg *config.Config, agentKind string) contex
 	contextSettings := config.ResolveAgentContext(cfg, agentKind)
 	compactionSettings := config.ResolveAgentContext(cfg, config.AgentKindContextCompaction)
 	modelSettings := config.ResolveAgentModel(cfg, agentKind)
+	// T1: Use the actual context window (from /v1/models probe or server
+	// rejection calibration) when it is smaller than the declared window.
+	// Both sources are cached per base URL; if neither has produced a value,
+	// the declared window is used unchanged.
+	declaredWindow := modelSettings.ContextWindowTokens
+	actualWindow := knownActualContextWindow(modelSettings.OpenAIBaseURL)
 	return contextCompactionPolicy{
 		AgentKind:           agentKind,
 		Enabled:             contextSettings.CompactionEnabled,
 		Strategy:            contextSettings.CompactionStrategy,
-		ContextWindowTokens: modelSettings.ContextWindowTokens,
+		ContextWindowTokens: effectiveContextWindow(declaredWindow, actualWindow),
 		Threshold:           contextSettings.CompactionThreshold,
 		RetainedTurns:       compactionSettings.CompactionRecentTurns,
 		TargetMinRatio:      compactionSettings.CompactionTargetMin,
@@ -130,7 +168,13 @@ func (p contextCompactionPolicy) triggerTokens() int {
 	if !p.Enabled || p.ContextWindowTokens <= 0 || p.Threshold <= 0 {
 		return 0
 	}
-	return int(float64(p.ContextWindowTokens) * p.Threshold)
+	// T1: Apply the physical safety ratio so the compaction trigger fires
+	// before the hardware (KV cache + prefill buffers) OOMs on long context.
+	// The declared/actual window may be far larger than what 24GB VRAM can
+	// sustain; scaling by toolModePhysicalSafetyRatio (0.85) produces a
+	// conservative trigger line.
+	physical := physicalSafeWindow(p.ContextWindowTokens)
+	return int(float64(physical) * p.Threshold)
 }
 
 func (p contextCompactionPolicy) shouldCompact(tokens int, force bool) (bool, string) {
@@ -151,6 +195,226 @@ func (p contextCompactionPolicy) shouldCompact(tokens int, force bool) (bool, st
 		return false, "below_threshold"
 	}
 	return true, ""
+}
+
+// ── 三层分层压缩（Plan.md §12 / T2，借鉴 ACP / billion-context）─────────────────
+//
+// 摘要池分三层：T1 capture（原始→详细 ~45×）、T2 distill（T1→决策/结果 ~10×）、
+// T3 condense（T2→裸事实 ~5×）。每层独立触发阈值；高层蒸馏后低层 token 清零
+// （被高层取代）。投影使用最高可用层，保证投影确定性、不每轮重新压缩（H 修正）。
+//
+// 纯函数（nextTier/projectionSummary）便于单测；runTieredDistill 负责实际 LLM 蒸馏。
+
+// contextTieredThresholds 是三层触发阈值（token 数），0 表示该层不触发。
+type contextTieredThresholds struct {
+	T1 int
+	T2 int
+	T3 int
+}
+
+// tieredThresholdsFromSettings 从解析后的配置读取三层阈值（token 数）。
+func tieredThresholdsFromSettings(s config.ResolvedAgentContextSettings) contextTieredThresholds {
+	return contextTieredThresholds{
+		T1: int(s.TieredT1Threshold),
+		T2: int(s.TieredT2Threshold),
+		T3: int(s.TieredT3Threshold),
+	}
+}
+
+// tieredNextTier 决定下一层应执行的压缩层级（纯函数，便于单测）。
+// 返回 (tier, reason)：tier ∈ {1,2,3} 表示应执行该层；0 表示无需压缩。
+// T1 优先级最高（!shouldInject 守卫）：原始池超限时先捕获，再考虑蒸馏。
+func tieredNextTier(p session.ContextTieredPool, th contextTieredThresholds) (int, string) {
+	if th.T1 > 0 && p.RawTokens >= th.T1 {
+		return 1, "raw_pool_over_t1"
+	}
+	if th.T2 > 0 && p.T1Tokens >= th.T2 {
+		return 2, "t1_pool_over_t2"
+	}
+	if th.T3 > 0 && p.T2Tokens >= th.T3 {
+		return 3, "t2_pool_over_t3"
+	}
+	return 0, "below_threshold"
+}
+
+// tieredProjectionSummary 返回投影应使用的摘要（最高可用层：T3 > T2 > T1）。
+// 投影恒定：同一池状态总是返回同一摘要，避免每轮重新压缩。
+func tieredProjectionSummary(p session.ContextTieredPool) string {
+	switch {
+	case strings.TrimSpace(p.T3Summary) != "":
+		return p.T3Summary
+	case strings.TrimSpace(p.T2Summary) != "":
+		return p.T2Summary
+	case strings.TrimSpace(p.T1Summary) != "":
+		return p.T1Summary
+	default:
+		return ""
+	}
+}
+
+// tieredPoolActive 报告池是否已有任意层摘要。
+func tieredPoolActive(p session.ContextTieredPool) bool {
+	return strings.TrimSpace(p.T1Summary) != "" ||
+		strings.TrimSpace(p.T2Summary) != "" ||
+		strings.TrimSpace(p.T3Summary) != ""
+}
+
+// runTieredDistill 在 T1 捕获完成后执行 T2/T3 蒸馏级联（高层蒸馏后低层清零）。
+// 返回更新后的池。T1 捕获由调用方完成（复用现有增量摘要），这里只做 T2→T3 级联。
+func runTieredDistill(ctx context.Context, cfg *config.Config, agentKind string, pool session.ContextTieredPool, th contextTieredThresholds, policy contextCompactionPolicy) (session.ContextTieredPool, error) {
+	// T2 distill：T1 摘要 → 决策/结果
+	if th.T2 > 0 && pool.T1Tokens >= th.T2 {
+		summary, _, err := summarizeContextForCompaction(ctx, cfg, agentKind, "", []*schema.Message{schema.UserMessage(pool.T1Summary)}, "", pool.T1Tokens, policy, func(_ int, _ string) {})
+		if err != nil {
+			return pool, err
+		}
+		pool.T2Summary = summary
+		pool.T2Tokens = estimateStringTokens(summary)
+		pool.T1Tokens = 0 // T1 被 T2 取代
+	}
+	// T3 condense：T2 摘要 → 裸事实
+	if th.T3 > 0 && pool.T2Tokens >= th.T3 {
+		summary, _, err := summarizeContextForCompaction(ctx, cfg, agentKind, "", []*schema.Message{schema.UserMessage(pool.T2Summary)}, "", pool.T2Tokens, policy, func(_ int, _ string) {})
+		if err != nil {
+			return pool, err
+		}
+		pool.T3Summary = summary
+		pool.T3Tokens = estimateStringTokens(summary)
+		pool.T2Tokens = 0 // T2 被 T3 取代
+	}
+	return pool, nil
+}
+
+// ── 压缩候选优先级排序（Plan.md §12 / T4，借鉴 ACP T1 优先级）─────────────────
+//
+// 当模型/系统选择压缩范围时，按内容类型决定"先压什么"：
+// 子代理审查/咨询 > 冗长命令输出 > 死路探索 > 冗余工具结果 > 多步任务中间步骤
+// > 已解决讨论线程 > 大文件已使用。
+// 排序结果用于引导（提示词/工具描述），不强制截断，保持投影稳定。
+
+// compactionCandidatePriority 是压缩候选的优先级类别（数值越小越先压缩）。
+type compactionCandidatePriority int
+
+const (
+	compactionPrioritySubAgentReview        compactionCandidatePriority = iota // 子代理审查/咨询
+	compactionPriorityVerboseCommand                                           // 冗长命令输出
+	compactionPriorityDeadEnd                                                  // 死路探索
+	compactionPriorityRedundantToolResult                                      // 冗余工具结果
+	compactionPriorityMultiStepIntermediate                                    // 多步任务中间步骤
+	compactionPriorityResolvedDiscussion                                       // 已解决讨论线程
+	compactionPriorityLargeFileUsed                                            // 大文件已使用
+	compactionPriorityDefault                                                  // 未分类（最后压缩）
+)
+
+// compactionCandidate 是一条可压缩消息的轻量描述（用于排序，不持有完整消息）。
+type compactionCandidate struct {
+	Index    int // 0-based 消息下标
+	Priority compactionCandidatePriority
+	Tokens   int
+}
+
+// classifyCompactionCandidate 按内容类型给单条消息分类（纯函数，便于单测）。
+// 规则保守：仅当特征明显时归入高优先级类别，否则归入 Default。
+func classifyCompactionCandidate(msg *schema.Message) compactionCandidatePriority {
+	if msg == nil {
+		return compactionPriorityDefault
+	}
+	content := strings.ToLower(msg.Content)
+	switch {
+	case msg.Role == schema.Tool:
+		switch {
+		// 冗长命令输出：工具结果且内容很长（命令/构建/测试输出）。
+		case estimateStringTokens(msg.Content) >= 800:
+			return compactionPriorityVerboseCommand
+		// 冗余工具结果：重复/空/纯确认类短结果。
+		case isRedundantToolResult(msg):
+			return compactionPriorityRedundantToolResult
+		}
+		return compactionPriorityDefault
+	case msg.Role == schema.Assistant:
+		switch {
+		// 子代理审查/咨询：assistant 消息引用子代理委派或审查结论。
+		case strings.Contains(content, "subagent") || strings.Contains(content, "sub_agent") ||
+			strings.Contains(content, "子代理") || strings.Contains(content, "审查结论"):
+			return compactionPrioritySubAgentReview
+		// 死路探索：明确标记尝试失败/走不通。
+		case strings.Contains(content, "dead end") || strings.Contains(content, "死路") ||
+			strings.Contains(content, "走不通") || strings.Contains(content, "此路不通"):
+			return compactionPriorityDeadEnd
+		// 多步任务中间步骤：编号步骤/中间产物描述。
+		case strings.Contains(content, "step ") || strings.Contains(content, "步骤 ") ||
+			strings.Contains(content, "intermediate"):
+			return compactionPriorityMultiStepIntermediate
+		// 已解决讨论线程：明确标记已解决/已确认。
+		case strings.Contains(content, "resolved") || strings.Contains(content, "已解决") ||
+			strings.Contains(content, "已确认"):
+			return compactionPriorityResolvedDiscussion
+		}
+		return compactionPriorityDefault
+	case msg.Role == schema.User:
+		// 大文件已使用：用户粘贴的大段内容（通常已被后续引用）。
+		if estimateStringTokens(msg.Content) >= 1500 {
+			return compactionPriorityLargeFileUsed
+		}
+		return compactionPriorityDefault
+	}
+	return compactionPriorityDefault
+}
+
+// isRedundantToolResult 判断工具结果是否冗余（空/纯确认/重复标记）。
+func isRedundantToolResult(msg *schema.Message) bool {
+	trimmed := strings.TrimSpace(msg.Content)
+	if trimmed == "" {
+		return true
+	}
+	lower := strings.ToLower(trimmed)
+	for _, marker := range []string{"ok", "success", "done", "completed", "no output", "（无输出）", "成功"} {
+		if lower == marker {
+			return true
+		}
+	}
+	return false
+}
+
+// rankCompactionCandidates 把消息序列转成按优先级排序的候选列表。
+// 排序键：优先级类别（小→大），同类内按 token 降序（大的先压），再按下标升序（稳定）。
+// 纯函数，便于单测。
+func rankCompactionCandidates(messages []*schema.Message) []compactionCandidate {
+	candidates := make([]compactionCandidate, 0, len(messages))
+	for i, msg := range messages {
+		if msg == nil {
+			continue
+		}
+		candidates = append(candidates, compactionCandidate{
+			Index:    i,
+			Priority: classifyCompactionCandidate(msg),
+			Tokens:   estimateStringTokens(msg.Content),
+		})
+	}
+	sort.SliceStable(candidates, func(a, b int) bool {
+		if candidates[a].Priority != candidates[b].Priority {
+			return candidates[a].Priority < candidates[b].Priority
+		}
+		if candidates[a].Tokens != candidates[b].Tokens {
+			return candidates[a].Tokens > candidates[b].Tokens
+		}
+		return candidates[a].Index < candidates[b].Index
+	})
+	return candidates
+}
+
+// compactionPriorityGuidance 是注入压缩提示词的优先级引导文本（双语）。
+// 对应 ACP T1 优先级 + billion-context STAGED_COMPRESS_GUIDANCE 的 tail-biased 思想。
+func compactionPriorityGuidance() string {
+	return strings.TrimSpace(`
+压缩优先级（先压什么）：
+- 子代理审查/咨询输出 > 冗长命令输出 > 死路探索 > 冗余工具结果 > 多步任务中间步骤 > 已解决讨论线程 > 大文件已使用。
+- 优先压缩上述高优先级内容；用户消息与未闭环事项最后压缩。
+
+尾部偏置（tail-biased）折叠引导：
+- 压缩范围尽量偏向对话尾部（最近的消息），保持较早的稳定前缀不变，以最大化 KV cache 命中。
+- 若必须压缩较早内容，优先选择上述高优先级类别，避免无差别从头截断。
+`)
 }
 
 func BuildContextCompaction(ctx context.Context, cfg *config.Config, agentKind string, input ContextCompactionInput, epoch int) ([]*schema.Message, ContextCompactionResult, error) {
@@ -380,22 +644,6 @@ func compactMessagesForModel(messages []*schema.Message, summary string, epoch, 
 	return result
 }
 
-func compactedMessagesAfterSource(messages []*schema.Message, effectiveStart, sourceEndIndex, retainedTurns int) []*schema.Message {
-	sourceEndOffset := sourceEndIndex - effectiveStart
-	if sourceEndOffset < 0 {
-		sourceEndOffset = 0
-	}
-	if sourceEndOffset > len(messages) {
-		sourceEndOffset = len(messages)
-	}
-	sourceTail := retainTailByUserTurns(compactionContextMessages(messages[:sourceEndOffset]), retainedTurns)
-	appended := compactionContextMessages(messages[sourceEndOffset:])
-	tail := make([]*schema.Message, 0, len(sourceTail)+len(appended))
-	tail = append(tail, sourceTail...)
-	tail = append(tail, appended...)
-	return tail
-}
-
 func compactionContextMessages(messages []*schema.Message) []*schema.Message {
 	filtered := make([]*schema.Message, 0, len(messages))
 	for _, msg := range messages {
@@ -421,7 +669,11 @@ func generateContextCompactionSummary(ctx context.Context, cfg *config.Config, a
 		"source_tokens":     sourceTokens,
 	})
 	defer func() { finishTrace(runErr) }()
-	modelCfg := chatModelConfigForAgent(cfg, config.AgentKindContextCompaction)
+	// The compaction prompt is owned by the compaction agent, but the model must
+	// follow the agent whose context is being compacted. This keeps a stale
+	// dedicated compaction profile from routing every summary through an old
+	// model.
+	modelCfg := chatModelConfigForAgent(cfg, agentKind)
 	inputChars := contextCompactionInputChars(existingCheckpoint, source, referenceContext)
 	cm, err := openai.NewChatModel(traceCtx, &modelCfg)
 	if err != nil {
@@ -602,6 +854,8 @@ func contextCompactionSystemInstruction() string {
 
 【用户意图与任务约束】
 - 仍会影响后续行为的目标、偏好、拒绝、边界与已确认决策
+
+` + compactionPriorityGuidance() + `
 `)
 }
 

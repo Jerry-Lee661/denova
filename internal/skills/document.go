@@ -36,12 +36,19 @@ func ReadDocument(ctx context.Context, dirs []Directory, scope Scope, name strin
 		return Document{}, err
 	}
 	defer skillRoot.Close()
-	data, err := skillRoot.ReadFile(SkillFileName)
+
+	// 优先读取 .gz 压缩版本，回退到原始 SKILL.md
+	skillDir := filepath.Join(dir.Path, name)
+	content, _, err := readSkillContent(skillDir)
 	if err != nil {
 		return Document{}, err
 	}
-	path := filepath.Join(dir.Path, name, SkillFileName)
-	rec, err := parseRecord(ctx, dir, path, string(data))
+	if content == "" {
+		return Document{}, fmt.Errorf("skill %q has no readable content", name)
+	}
+
+	mdPath := filepath.Join(dir.Path, name, SkillFileName)
+	rec, err := parseRecord(ctx, dir, mdPath, string(content))
 	if err != nil {
 		return Document{}, err
 	}
@@ -51,7 +58,7 @@ func ReadDocument(ctx context.Context, dirs []Directory, scope Scope, name strin
 	if err != nil {
 		return Document{}, err
 	}
-	return Document{SkillSummary: rec.summary, Content: string(data), Revision: skillContentRevision(data), Files: files}, nil
+	return Document{SkillSummary: rec.summary, Content: content, Revision: skillContentRevision([]byte(content)), Files: files}, nil
 }
 
 func CreateDocument(ctx context.Context, dirs []Directory, scope Scope, name, description string, agents ...string) (Document, error) {

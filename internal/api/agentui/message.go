@@ -179,6 +179,9 @@ func entryPayload(entry session.HistoryEntry) map[string]any {
 func metadataFromHistoryEntry(entry session.HistoryEntry) map[string]any {
 	metadata := map[string]any{}
 	addMetadataPayload(metadata, entry)
+	if entry.MessageIndex >= 0 {
+		metadata["message_index"] = entry.MessageIndex
+	}
 	if createdAt := formatEntryTime(entry); createdAt != "" {
 		metadata["created_at"] = createdAt
 	}
@@ -218,6 +221,9 @@ func addMetadataPayload(target map[string]any, entry session.HistoryEntry) {
 	}
 	if entry.SubAgentType != "" {
 		target["subagent_type"] = entry.SubAgentType
+	}
+	if strings.TrimSpace(entry.ModelName) != "" {
+		target["model_name"] = entry.ModelName
 	}
 	if len(entry.SSEHiddenFields) > 0 {
 		target["sse_hidden_fields"] = append([]string(nil), entry.SSEHiddenFields...)

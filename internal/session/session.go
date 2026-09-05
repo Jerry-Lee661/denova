@@ -20,6 +20,7 @@ func (s *Session) AppendWithMetadata(msg *schema.Message, metadata MessageMetada
 	now := time.Now().UTC()
 	metadata = sanitizeMessageMetadata(metadata)
 	s.messages = append(s.messages, msg)
+	s.LinkCurrent(-1, "")
 	s.records = append(s.records, historyRecord{kind: historyTypeMessage, message: msg, messageMetadata: metadata, createdAt: now})
 	s.UpdatedAt = now
 	if s.title == defaultSessionTitle && msg.Role == schema.User && strings.TrimSpace(msg.Content) != "" {
@@ -36,6 +37,7 @@ func sanitizeMessageMetadata(metadata MessageMetadata) MessageMetadata {
 	metadata.RootAgentName = strings.TrimSpace(metadata.RootAgentName)
 	metadata.SubAgentSessionID = strings.TrimSpace(metadata.SubAgentSessionID)
 	metadata.SubAgentType = strings.TrimSpace(metadata.SubAgentType)
+	metadata.ModelName = strings.TrimSpace(metadata.ModelName)
 	if len(metadata.RunPath) > 0 {
 		out := make([]string, 0, len(metadata.RunPath))
 		for _, step := range metadata.RunPath {
@@ -97,6 +99,7 @@ func (s *Session) AppendContextMessage(msg *schema.Message) error {
 	}
 	now := time.Now().UTC()
 	s.messages = append(s.messages, msg)
+	s.LinkCurrent(-1, "")
 	s.records = append(s.records, historyRecord{kind: historyTypeContextMessage, message: msg, createdAt: now})
 	s.UpdatedAt = now
 	return s.persistLocked()
@@ -124,14 +127,13 @@ func (s *Session) GetMessages() []*schema.Message {
 	return result
 }
 
-// GetEffectiveMessages 返回最后一个清理标记之后的 Agent 有效上下文。
+// GetEffectiveMessages 返回压缩边界之后（沿活动分支）的 Agent 有效上下文。
+// 与线性版本不同：先取活动分支末端，再沿 prevIdx 回溯收集逻辑链，最后按边界裁剪。
 func (s *Session) GetEffectiveMessages() []*schema.Message {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	result := make([]*schema.Message, len(s.messages)-s.clearAfterIndex)
-	copy(result, s.messages[s.clearAfterIndex:])
-	return result
+	return s.getEffectiveMessagesLocked()
 }
 
 // MessageCountSinceClear returns the number of effective raw transcript
@@ -150,25 +152,37 @@ func (s *Session) MessageCountTotal() int {
 }
 
 // History 返回包含 clear 标记的完整会话历史。
+// 若会话被逻辑截断（truncateAfterIndex >= 0），只返回截断点之前（含）的条目；
+// 截断点之后的消息与展示记录不返回，但磁盘记录保留可回滚。
 func (s *Session) History() []HistoryEntry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	result := make([]HistoryEntry, 0, len(s.records))
+	messageCount := 0
 	for _, record := range s.records {
+		// 会话逻辑隐藏区间 [hiddenStart, hiddenEnd)：区间内消息及其展示记录不输出，
+		// 但磁盘记录保留。隐藏区间结束后恢复正常输出。
+		// 直接用 messageCount 范围判断（而非状态机），确保 clear/display 记录
+		// 在隐藏区间首条消息之前出现时也能正确判定。
+		inHiddenRange := s.hiddenStart >= 0 && messageCount >= s.hiddenStart && messageCount < s.hiddenEnd
 		switch record.kind {
-		case historyTypeClear:
-			result = append(result, HistoryEntry{Type: historyTypeClear, CreatedAt: record.createdAt})
 		case historyTypeMessage:
 			if record.message == nil {
 				continue
 			}
+			if inHiddenRange {
+				messageCount++
+				continue
+			}
+			messageCount++
 			result = append(result, HistoryEntry{
 				Type:              historyTypeMessage,
 				Role:              string(record.message.Role),
 				Content:           record.message.Content,
 				Message:           record.message,
 				CreatedAt:         record.createdAt,
+				MessageIndex:      messageCount - 1,
 				RunID:             record.messageMetadata.RunID,
 				AgentKind:         record.messageMetadata.AgentKind,
 				AgentName:         record.messageMetadata.AgentName,
@@ -177,10 +191,22 @@ func (s *Session) History() []HistoryEntry {
 				SubAgent:          record.messageMetadata.SubAgent,
 				SubAgentSessionID: record.messageMetadata.SubAgentSessionID,
 				SubAgentType:      record.messageMetadata.SubAgentType,
+				ModelName:         record.messageMetadata.ModelName,
 				UserReferences:    append([]UserMessageReference(nil), record.messageMetadata.UserReferences...),
 			})
+		case historyTypeClear:
+			// 隐藏区间内的 clear 分界不输出：其所在消息段已被逻辑截断，分界无意义；
+			// 其余情况保留 clear 分界，供 UI 显示"上下文已清理"。
+			if inHiddenRange {
+				continue
+			}
+			result = append(result, HistoryEntry{Type: historyTypeClear, CreatedAt: record.createdAt})
 		case historyTypeDisplay:
 			if record.display == nil {
+				continue
+			}
+			// 隐藏区间内的展示记录（thinking/工具卡片/token 用量）一并跳过。
+			if inHiddenRange {
 				continue
 			}
 			result = append(result, HistoryEntry{
@@ -202,6 +228,7 @@ func (s *Session) History() []HistoryEntry {
 				SubAgent:             record.display.SubAgent,
 				SubAgentSessionID:    record.display.SubAgentSessionID,
 				SubAgentType:         record.display.SubAgentType,
+				ModelName:            record.display.ModelName,
 				PromptTokens:         record.display.PromptTokens,
 				CachedPromptTokens:   record.display.CachedPromptTokens,
 				UncachedPromptTokens: record.display.UncachedPromptTokens,
@@ -267,6 +294,83 @@ func cloneChapterIllustration(value *ChapterIllustration) *ChapterIllustration {
 // Clear 兼容旧调用语义：追加 clear 标记，不物理删除消息。
 func (s *Session) Clear() error {
 	return s.AppendClearMarker()
+}
+
+// AppendTruncate 设置会话逻辑截断：保留到 messageIndex（含）的消息，之后已存在的
+// 消息（索引区间 [messageIndex+1, len(messages))）进入隐藏区间——不再显示/进入模型，
+// 但磁盘记录保留（append-only），可通过 TruncateIndex 查询并由调用方决定是否回滚。
+// 截断之后新增的消息索引 >= 隐藏区间终点，不受影响。
+// 用于用户"重试生成"或"还原检查点"后的聊天截断。
+func (s *Session) AppendTruncate(messageIndex int, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	index := messageIndex
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(s.messages) {
+		index = len(s.messages) - 1
+	}
+	now := time.Now().UTC()
+	s.hiddenStart = index + 1
+	s.hiddenEnd = len(s.messages)
+	record := Truncate{Type: historyTypeTruncate, MessageIndex: index, Reason: strings.TrimSpace(reason), CreatedAt: now}
+	s.records = append(s.records, historyRecord{kind: historyTypeTruncate, truncate: &record, createdAt: now})
+	s.UpdatedAt = now
+	return s.persistLocked()
+}
+
+// TruncateIndex 返回当前会话逻辑截断点（最后一条可见消息索引，含）；-1 表示未截断。
+func (s *Session) TruncateIndex() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.hiddenStart < 0 {
+		return -1
+	}
+	return s.hiddenStart - 1
+}
+
+// AppendCheckpoint 记录一次"工作区 + 聊天"检查点并持久化（append-only）。
+func (s *Session) AppendCheckpoint(record Checkpoint) (Checkpoint, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	record.Type = historyTypeCheckpoint
+	if strings.TrimSpace(record.ID) == "" {
+		record.ID = newCheckpointID()
+	}
+	if record.MessageIndex < 0 {
+		record.MessageIndex = 0
+	}
+	if record.MessageIndex >= len(s.messages) {
+		record.MessageIndex = len(s.messages) - 1
+	}
+	if record.CreatedAt.IsZero() {
+		record.CreatedAt = time.Now().UTC()
+	}
+	s.records = append(s.records, historyRecord{kind: historyTypeCheckpoint, checkpoint: &record, createdAt: record.CreatedAt})
+	if record.CreatedAt.After(s.UpdatedAt) {
+		s.UpdatedAt = record.CreatedAt
+	}
+	if err := s.persistLocked(); err != nil {
+		return Checkpoint{}, err
+	}
+	return record, nil
+}
+
+// ListCheckpoints 返回会话内全部检查点（按创建时间升序，即磁盘顺序）。
+func (s *Session) ListCheckpoints() []Checkpoint {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result := make([]Checkpoint, 0, 8)
+	for _, record := range s.records {
+		if record.kind == historyTypeCheckpoint && record.checkpoint != nil {
+			result = append(result, *record.checkpoint)
+		}
+	}
+	return result
 }
 
 // Rename 更新会话标题并持久化。

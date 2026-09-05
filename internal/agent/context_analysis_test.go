@@ -370,13 +370,11 @@ func TestIDEContextAnalysisKeepsPostCompactionMessages(t *testing.T) {
 	cfg := &config.Config{}
 
 	analysisMessages := buildIDEAnalysisMessages(cfg, messages, len(messages), compaction)
+	// 新投影语义（目标 H）：摘要 + retainTailByUserTurns(全部有效消息, retainedTurns)。
+	// RetainedTurns=1 → 仅保留最近 1 个用户轮（user3/assistant3），旧轮折叠进摘要。
 	got := messageContents(analysisMessages)
 	want := []string{
 		analysisMessages[0].Content,
-		"user 1",
-		"assistant 1",
-		"user 2",
-		"assistant 2",
 		"user 3",
 		"assistant 3",
 	}

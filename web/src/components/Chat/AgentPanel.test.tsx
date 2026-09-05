@@ -438,6 +438,7 @@ function defaultAgentPanelProps(
     selectedFile: null,
     tellers: [{ id: 'classic', name: '默认叙事', style_rules: [] } as any],
     messages: [],
+    checkpoints: [],
     sessions: [{ id: 'session-1', title: '当前会话', active: true, message_count: 0, created_at: '', updated_at: '' }],
     activeSessionId: 'session-1',
     isStreaming: false,

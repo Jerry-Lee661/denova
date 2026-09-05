@@ -94,6 +94,9 @@ func (c *directorDisplayConversation) AppendAssistant(string) error             
 func (c *directorDisplayConversation) MarkInterrupted(_, _, _ string) error       { return nil }
 func (c *directorDisplayConversation) PendingInterruption() *session.Interruption { return nil }
 func (c *directorDisplayConversation) ResolveInterruption(string) error           { return nil }
+func (c *directorDisplayConversation) RuntimeState() session.RuntimeState {
+	return session.RuntimeState{}
+}
 
 func (c *directorDisplayConversation) AppendDisplayEvent(event session.DisplayEvent) error {
 	for i := range c.events {

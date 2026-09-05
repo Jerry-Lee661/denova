@@ -565,6 +565,88 @@ func (s *Store) AppendContextCompactionRemoval(storyID, branchID string, event C
 	return event, nil
 }
 
+// AppendContextFold persists a context-fold event. Like compaction it advances
+// the branch head so the latest fold is picked up during snapshot projection,
+// but it does not delete raw turns — only the model-visible projection changes.
+// It is mutually exclusive with full compaction: PrepareMessages prefers an
+// active compaction over an active fold.
+func (s *Store) AppendContextFold(storyID, branchID string, event ContextFoldEvent) (ContextFoldEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	meta, lines, err := s.readStoryLocked(storyID)
+	if err != nil {
+		return ContextFoldEvent{}, err
+	}
+	if branchID == "" {
+		branchID = meta.CurrentBranch
+	}
+	branch, ok := meta.Branches[branchID]
+	if !ok {
+		return ContextFoldEvent{}, fmt.Errorf("分支不存在: %s", branchID)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if event.ID == "" {
+		event.ID = newID("cf")
+	}
+	event.V = schemaVersion
+	event.Type = StoryEventTypeFold
+	event.ParentID = branch.Head
+	event.BranchID = branchID
+	if event.Ts == "" {
+		event.Ts = now
+	}
+	branch.Head = event.ID
+	meta.Branches[branchID] = branch
+	meta.UpdatedAt = now
+	if err := s.rewriteStoryLocked(storyID, meta, lines, event); err != nil {
+		return ContextFoldEvent{}, err
+	}
+	if err := s.touchIndexLocked(storyID, now, 1); err != nil {
+		return ContextFoldEvent{}, err
+	}
+	return event, nil
+}
+
+// AppendContextFoldRemoval soft-disables the latest active fold for a branch.
+func (s *Store) AppendContextFoldRemoval(storyID, branchID string, event ContextFoldRemovalEvent) (ContextFoldRemovalEvent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	meta, lines, err := s.readStoryLocked(storyID)
+	if err != nil {
+		return ContextFoldRemovalEvent{}, err
+	}
+	if branchID == "" {
+		branchID = meta.CurrentBranch
+	}
+	branch, ok := meta.Branches[branchID]
+	if !ok {
+		return ContextFoldRemovalEvent{}, fmt.Errorf("分支不存在: %s", branchID)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if event.ID == "" {
+		event.ID = newID("cfr")
+	}
+	event.V = schemaVersion
+	event.Type = StoryEventTypeFoldRemoved
+	event.ParentID = branch.Head
+	event.BranchID = branchID
+	if event.Ts == "" {
+		event.Ts = now
+	}
+	branch.Head = event.ID
+	meta.Branches[branchID] = branch
+	meta.UpdatedAt = now
+	if err := s.rewriteStoryLocked(storyID, meta, lines, event); err != nil {
+		return ContextFoldRemovalEvent{}, err
+	}
+	if err := s.touchIndexLocked(storyID, now, 1); err != nil {
+		return ContextFoldRemovalEvent{}, err
+	}
+	return event, nil
+}
+
 func (s *Store) AppendTurn(storyID string, req AppendTurnRequest) (TurnEvent, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

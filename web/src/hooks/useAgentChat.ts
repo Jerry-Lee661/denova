@@ -1,20 +1,25 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useChat as useAIChat } from '@ai-sdk/react'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 import {
   abortChat,
   analyzeChatContext,
   createSession,
   deleteSession,
   executeCommand,
+  executeTool,
   getActiveChatTask,
+  getCheckpoints,
   getMessagesPage,
   getSessions,
   renameSession,
+  restoreCheckpoint as restoreCheckpointApi,
   switchSession,
+  truncateSession,
 } from '@/lib/api'
 import type { ContextAnalysis, IDEContext, SessionSummary, TextSelection } from '@/lib/api'
-import type { UserMessageReference } from '@/lib/api-client/types'
+import type { Checkpoint, UserMessageReference } from '@/lib/api-client/types'
 import { fetchSettings } from '@/features/settings/api'
 import { formatApprovedPlanExecutionMessage } from '@/lib/plan-mode'
 import {
@@ -89,6 +94,7 @@ export function useAgentChat(options: ChatOptions = {}) {
   const [planModes, setPlanModes] = useState<Record<string, boolean>>(() => readChatPlanModes())
   const [hasEarlierMessages, setHasEarlierMessages] = useState(false)
   const [isLoadingEarlierHistory, setIsLoadingEarlierHistory] = useState(false)
+  const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([])
   const historyRequestGenerationRef = useRef(0)
   const earlierHistoryRequestRef = useRef(0)
   const earlierHistoryLoadingRef = useRef(false)
@@ -343,6 +349,113 @@ export function useAgentChat(options: ChatOptions = {}) {
     return analyzeChatContext(prepared.message, prepared.references, prepared.loreReferences, prepared.styleScenes, prepared.textSelections, prepared.planMode, sendOptions.writingSkill, sendOptions.ideContext, sendOptions.imagePresetId, sendOptions.tellerId)
   }, [isStreaming, prepareAgentRequest, t])
 
+  // 定位某条消息所属回合的源 user 消息 view（按 turn_id 回溯；无 turn_id 时取最近一条 user）。
+  // 重试（regenerateMessage）与编辑（startEditTurn）共用该定位逻辑。
+  // 若 view 本身是 user 消息，则它就是源（编辑/重试该条 user 消息）；
+  // 否则（assistant/tool 等）向前回溯到同 turn 的最近一条 user 消息。
+  const findTurnSourceUserView = useCallback((view: AgentMessageView): AgentMessageView | null => {
+    const views = buildAgentMessageViews(messages)
+    const viewIndex = views.findIndex((item) => item.key === view.key)
+    if (viewIndex < 0) return null
+    // user 消息本身就是源
+    if (view.kind === 'user') return view
+    const turnID = view.metadata.turn_id
+    return [...views.slice(0, viewIndex)].reverse().find((item) =>
+      item.kind === 'user' && (!turnID || item.metadata.turn_id === turnID),
+    ) ?? null
+  }, [messages])
+
+  const regenerateMessage = useCallback(async (view: AgentMessageView) => {
+    if (isStreaming) return false
+    const source = findTurnSourceUserView(view)
+    if (!source) return false
+    // 截断式重试：定位源 user 消息，先对后端做逻辑截断（保留到该 user 消息），
+    // 再本地移除其后的旧消息，最后重发该 user 消息原文以替换原回合。
+    // 后端截断用原始消息数组索引（message_index）；UI 数组含展示记录（工具卡片/thinking/token），
+    // 其下标会偏移，故本地切片仍用 UI 下标，两者不可混用。
+    const sourceMessage = messages.find((message) => message.id === source.messageId)
+    const uiIndex = sourceMessage ? messages.indexOf(sourceMessage) : -1
+    const backendIndex = sourceMessage?.metadata?.message_index ?? uiIndex
+    if (backendIndex >= 0) {
+      await truncateSession(activeSessionId, backendIndex, 'retry')
+    }
+    if (uiIndex >= 0) {
+      setUIMessages((all) => all.slice(0, uiIndex + 1))
+    }
+    return send(agentViewContent(source))
+  }, [activeSessionId, findTurnSourceUserView, isStreaming, messages, send, setUIMessages, truncateSession])
+
+  // 编辑并重试：截断到源 user 消息（reason='edit'），返回源 user 消息原文供 composer 预填。
+  // 返回 null 表示未找到源消息（调用方不预填）。与 regenerateMessage 的区别：不自动重发，
+  // 由用户修改预填内容后手动发送（Copilot 式「编辑过往消息」语义）。
+  const startEditTurn = useCallback(async (view: AgentMessageView): Promise<string | null> => {
+    if (isStreaming) return null
+    const source = findTurnSourceUserView(view)
+    if (!source) return null
+    const sourceMessage = messages.find((message) => message.id === source.messageId)
+    const uiIndex = sourceMessage ? messages.indexOf(sourceMessage) : -1
+    // 后端截断用原始消息数组索引（message_index）；UI 数组含展示记录会偏移，本地切片用 UI 下标。
+    const backendIndex = sourceMessage?.metadata?.message_index ?? uiIndex
+    if (backendIndex >= 0) {
+      await truncateSession(activeSessionId, backendIndex, 'edit')
+    }
+    if (uiIndex >= 0) {
+      setUIMessages((all) => all.slice(0, uiIndex + 1))
+    }
+    return agentViewContent(source)
+  }, [activeSessionId, findTurnSourceUserView, isStreaming, messages, setUIMessages, truncateSession])
+
+  // 把指定消息中指定 part 更新为新的工具状态（T4 重试）。工具 part 是 `dynamic-tool`，
+  // spread 后 TS 会丢失 type 判别字段（运行时保留），故用断言对齐 AgentUIMessage part 联合类型。
+  const updateToolPartState = useCallback((messages: AgentUIMessage[], messageId: string, partIndex: number, patch: { state: string; output?: string; errorText?: string }): AgentUIMessage[] => {
+    return messages.map((msg) => {
+      if (msg.id !== messageId) return msg
+      return {
+        ...msg,
+        parts: msg.parts.map((part, i) => {
+          if (i !== partIndex) return part
+          const p = part as Record<string, unknown>
+          return { ...p, ...patch } as AgentUIMessage['parts'][number]
+        }),
+      }
+    })
+  }, [])
+
+  // retryTool 重发同一工具调用的参数，成功后把工具卡片切到成功态，失败则切到错误态。
+  const retryTool = useCallback(async (view: AgentMessageView) => {
+    if (isStreaming || !view.toolName) return
+    const args = JSON.stringify(view.input ?? {})
+    setUIMessages((prev) => updateToolPartState(prev, view.messageId, view.partIndex, { state: 'input-available', output: undefined, errorText: undefined }))
+    try {
+      const res = await executeTool(view.toolName, args)
+      if (res.error) {
+        setUIMessages((prev) => updateToolPartState(prev, view.messageId, view.partIndex, { state: 'output-error', errorText: res.error }))
+      } else {
+        setUIMessages((prev) => updateToolPartState(prev, view.messageId, view.partIndex, { state: 'output-available', output: res.result, errorText: undefined }))
+      }
+    } catch (e) {
+      setUIMessages((prev) => updateToolPartState(prev, view.messageId, view.partIndex, { state: 'output-error', errorText: String(e) }))
+    }
+  }, [isStreaming, setUIMessages, updateToolPartState])
+
+  const loadCheckpoints = useCallback(async () => {
+    try {
+      setCheckpoints(await getCheckpoints(activeSessionId))
+    } catch (e) {
+      console.error('加载检查点失败', e)
+    }
+  }, [activeSessionId])
+
+  const restoreCheckpoint = useCallback(async (checkpointId: string) => {
+    if (!checkpointId) return
+    const result = await restoreCheckpointApi(checkpointId)
+    await loadHistory(activeSessionId)
+    await loadSessions()
+    await loadCheckpoints()
+    onAgentFileChange?.()
+    toast(t('chat.checkpoint.restored', { index: result.message_index }))
+  }, [activeSessionId, loadHistory, loadSessions, loadCheckpoints, onAgentFileChange, t])
+
   const submitPlanQuestion = useCallback((ref: AgentPartRef, content: string, _preview: string) => {
     setUIMessages(prev => markPlanUIMessageAction(prev, ref, 'answered'))
     void send(content, { planMode: true, hideUserMessage: true })
@@ -419,6 +532,8 @@ export function useAgentChat(options: ChatOptions = {}) {
     await resumeActiveChat()
   }, [loadHistory, loadSessions, resumeActiveChat, stopAIStream])
 
+  useEffect(() => { void loadCheckpoints() }, [loadCheckpoints])
+
   return {
     messages,
     sessions,
@@ -433,6 +548,12 @@ export function useAgentChat(options: ChatOptions = {}) {
     setPlanMode: setActivePlanMode,
     togglePlanMode,
     send,
+    regenerateMessage,
+    startEditTurn,
+    retryTool,
+    restoreCheckpoint,
+    loadCheckpoints,
+    checkpoints,
     analyzeContext,
     submitPlanQuestion,
     approveProposedPlan,

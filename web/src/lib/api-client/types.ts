@@ -43,6 +43,9 @@ export interface ChatMessage {
   subagent?: boolean
   subagent_session_id?: string
   subagent_type?: string
+  model_name?: string
+  /** 原始消息数组索引（后端 s.messages），截断/重试的 message_index 参数来源。 */
+  message_index?: number
   sse_hidden_fields?: string[]
   sse_hidden_reason?: string
   sse_display_notice?: string
@@ -56,6 +59,8 @@ export interface ChatMessage {
   total_tokens?: number
   model_calls?: number
   generated_bytes?: number
+  duration_ms?: number
+  speed_tps?: number
   usage_calls?: TokenUsageCall[]
   streaming?: boolean
   thinking_preview?: string
@@ -904,4 +909,23 @@ export interface TextSelection {
   startLine: number
   endLine: number
   content: string
+}
+
+export interface Checkpoint {
+  id: string
+  message_index: number
+  version_id?: string
+  title?: string
+  reason?: string
+  created_at: string
+}
+
+export interface CheckpointRestoreResult {
+  checkpoint: Checkpoint
+  version_id?: string
+  message_index: number
+}
+
+export interface SessionTruncateResult {
+  message_index: number
 }

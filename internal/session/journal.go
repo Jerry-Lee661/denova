@@ -52,6 +52,71 @@ func (s *Session) persistLocked() error {
 			if err := writeJSONLine(&sb, *record.compactionRemoval); err != nil {
 				return err
 			}
+		case historyTypeFold:
+			if record.fold == nil {
+				continue
+			}
+			if err := writeJSONLine(&sb, foldRecord{Type: historyTypeFold, ContextFold: *record.fold}); err != nil {
+				return err
+			}
+		case historyTypeFoldRemoved:
+			if record.foldRemoved == nil {
+				continue
+			}
+			if err := writeJSONLine(&sb, foldRemovedRecord{Type: historyTypeFoldRemoved, ContextFoldRemoved: *record.foldRemoved}); err != nil {
+				return err
+			}
+		case historyTypeExternalize:
+			if record.externalize == nil {
+				continue
+			}
+			if err := writeJSONLine(&sb, ExternalizedResultEntry(*record.externalize)); err != nil {
+				return err
+			}
+		case historyTypeMemoryNote:
+			if record.memoryNote == nil {
+				continue
+			}
+			if err := writeJSONLine(&sb, *record.memoryNote); err != nil {
+				return err
+			}
+		case historyTypeRuntimeState:
+			if record.runtimeState == nil {
+				continue
+			}
+			if err := writeJSONLine(&sb, *record.runtimeState); err != nil {
+				return err
+			}
+		case historyTypeCheckpoint:
+			if record.checkpoint == nil {
+				continue
+			}
+			if err := writeJSONLine(&sb, *record.checkpoint); err != nil {
+				return err
+			}
+		case historyTypeTruncate:
+			if record.truncate == nil {
+				continue
+			}
+			if err := writeJSONLine(&sb, *record.truncate); err != nil {
+				return err
+			}
+		case historyTypeChainLink:
+			if err := writeJSONLine(&sb, chainLinkRecord{
+				Type:         historyTypeChainLink,
+				MessageIndex: record.messageIndex,
+				PrevIndex:    record.prevIndex,
+				BranchID:     record.branchID,
+			}); err != nil {
+				return err
+			}
+		case historyTypeFork:
+			if record.fork == nil {
+				continue
+			}
+			if err := writeJSONLine(&sb, *record.fork); err != nil {
+				return err
+			}
 		case historyTypeDisplay:
 			if record.display == nil {
 				continue
@@ -94,6 +159,16 @@ type clearRecord struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+type foldRecord struct {
+	Type string `json:"type"`
+	ContextFold
+}
+
+type foldRemovedRecord struct {
+	Type string `json:"type"`
+	ContextFoldRemoved
+}
+
 type interruptionRecord struct {
 	Type string `json:"type"`
 	Interruption
@@ -130,6 +205,8 @@ func createSession(id, filePath, title string) (*Session, error) {
 		filePath:        filePath,
 		title:           title,
 		clearAfterIndex: 0,
+		hiddenStart:     -1,
+		hiddenEnd:       0,
 		messages:        make([]*schema.Message, 0),
 		records:         make([]historyRecord, 0),
 	}, nil
@@ -157,6 +234,8 @@ func loadSession(filePath string) (*Session, error) {
 		filePath:        filePath,
 		title:           defaultSessionTitle,
 		clearAfterIndex: 0,
+		hiddenStart:     -1,
+		hiddenEnd:       0,
 		messages:        make([]*schema.Message, 0),
 		records:         make([]historyRecord, 0),
 	}
@@ -200,6 +279,11 @@ func loadSession(filePath string) (*Session, error) {
 	}
 	if sess.UpdatedAt.IsZero() {
 		sess.UpdatedAt = sess.CreatedAt
+	}
+	sess.ensureChainLocked()
+	// 旧记录无 fork 记录时，活动分支末端默认为最后一条消息（线性链）。
+	if sess.activeLast < 0 || sess.activeLast >= len(sess.messages) {
+		sess.activeLast = len(sess.messages) - 1
 	}
 	sess.trimTokenUsageDisplayEventsLocked("")
 	return sess, nil
@@ -279,6 +363,166 @@ func appendRecordLine(sess *Session, line string) error {
 		}
 		return nil
 	}
+	if typed.Type == historyTypeFold {
+		var record foldRecord
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			return err
+		}
+		if strings.TrimSpace(record.ID) == "" {
+			record.ID = newContextFoldID()
+		}
+		if record.CreatedAt.IsZero() {
+			record.CreatedAt = sess.UpdatedAt
+		}
+		if record.Type == "" {
+			record.Type = historyTypeFold
+		}
+		sess.records = append(sess.records, historyRecord{kind: historyTypeFold, fold: &record.ContextFold, createdAt: record.CreatedAt})
+		if record.CreatedAt.After(sess.UpdatedAt) {
+			sess.UpdatedAt = record.CreatedAt
+		}
+		return nil
+	}
+	if typed.Type == historyTypeFoldRemoved {
+		var record foldRemovedRecord
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			return err
+		}
+		if strings.TrimSpace(record.ID) == "" {
+			record.ID = newContextFoldRemovedID()
+		}
+		if record.CreatedAt.IsZero() {
+			record.CreatedAt = sess.UpdatedAt
+		}
+		if record.Type == "" {
+			record.Type = historyTypeFoldRemoved
+		}
+		sess.records = append(sess.records, historyRecord{kind: historyTypeFoldRemoved, foldRemoved: &record.ContextFoldRemoved, createdAt: record.CreatedAt})
+		if record.CreatedAt.After(sess.UpdatedAt) {
+			sess.UpdatedAt = record.CreatedAt
+		}
+		return nil
+	}
+	if typed.Type == historyTypeExternalize {
+		var record ExternalizedResultEntry
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			return err
+		}
+		if record.CreatedAt.IsZero() {
+			record.CreatedAt = sess.UpdatedAt
+		}
+		sess.records = append(sess.records, historyRecord{kind: historyTypeExternalize, externalize: &record, createdAt: record.CreatedAt})
+		if record.CreatedAt.After(sess.UpdatedAt) {
+			sess.UpdatedAt = record.CreatedAt
+		}
+		return nil
+	}
+	if typed.Type == historyTypeMemoryNote {
+		var record MemoryNote
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			return err
+		}
+		if strings.TrimSpace(record.ID) == "" {
+			record.ID = newMemoryNoteID()
+		}
+		if strings.TrimSpace(record.AgentKind) == "" {
+			record.AgentKind = "ide"
+		}
+		if strings.TrimSpace(record.Title) == "" {
+			record.Title = "本轮笔记"
+		}
+		if record.CreatedAt.IsZero() {
+			record.CreatedAt = sess.UpdatedAt
+		}
+		sess.records = append(sess.records, historyRecord{kind: historyTypeMemoryNote, memoryNote: &record, createdAt: record.CreatedAt})
+		if record.CreatedAt.After(sess.UpdatedAt) {
+			sess.UpdatedAt = record.CreatedAt
+		}
+		return nil
+	}
+	if typed.Type == historyTypeRuntimeState {
+		var record RuntimeState
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			return err
+		}
+		if record.CreatedAt.IsZero() {
+			record.CreatedAt = sess.UpdatedAt
+		}
+		sess.records = append(sess.records, historyRecord{kind: historyTypeRuntimeState, runtimeState: &record, createdAt: record.CreatedAt})
+		if record.CreatedAt.After(sess.UpdatedAt) {
+			sess.UpdatedAt = record.CreatedAt
+		}
+		return nil
+	}
+	if typed.Type == historyTypeCheckpoint {
+		var record Checkpoint
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			return err
+		}
+		if strings.TrimSpace(record.ID) == "" {
+			record.ID = newCheckpointID()
+		}
+		if record.Type == "" {
+			record.Type = historyTypeCheckpoint
+		}
+		if record.CreatedAt.IsZero() {
+			record.CreatedAt = sess.UpdatedAt
+		}
+		sess.records = append(sess.records, historyRecord{kind: historyTypeCheckpoint, checkpoint: &record, createdAt: record.CreatedAt})
+		if record.CreatedAt.After(sess.UpdatedAt) {
+			sess.UpdatedAt = record.CreatedAt
+		}
+		return nil
+	}
+	if typed.Type == historyTypeTruncate {
+		var record Truncate
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			return err
+		}
+		// 顺序重放：隐藏区间终点 = 该截断记录出现时的消息数（截断时刻）。
+		// 之后新增的消息索引 >= hiddenEnd，不受隐藏区间影响。
+		if sess.hiddenStart < 0 || record.MessageIndex >= sess.hiddenStart-1 {
+			sess.hiddenStart = record.MessageIndex + 1
+			sess.hiddenEnd = len(sess.messages)
+		}
+		if record.CreatedAt.IsZero() {
+			record.CreatedAt = sess.UpdatedAt
+		}
+		sess.records = append(sess.records, historyRecord{kind: historyTypeTruncate, truncate: &record, createdAt: record.CreatedAt})
+		if record.CreatedAt.After(sess.UpdatedAt) {
+			sess.UpdatedAt = record.CreatedAt
+		}
+		return nil
+	}
+	if typed.Type == historyTypeChainLink {
+		var record chainLinkRecord
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			return err
+		}
+		sess.setPrevAt(record.MessageIndex, record.PrevIndex, record.BranchID)
+		sess.records = append(sess.records, historyRecord{kind: historyTypeChainLink, createdAt: time.Now().UTC()})
+		return nil
+	}
+	if typed.Type == historyTypeFork {
+		var record forkRecord
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			return err
+		}
+		if record.CreatedAt.IsZero() {
+			record.CreatedAt = sess.UpdatedAt
+		}
+		if record.Type == "" {
+			record.Type = historyTypeFork
+		}
+		sess.activeBranch = record.ActiveBranch
+		sess.activeLast = record.ActiveLast
+		sess.forkPoint = record.ForkPoint
+		sess.records = append(sess.records, historyRecord{kind: historyTypeFork, fork: &record, createdAt: record.CreatedAt})
+		if record.CreatedAt.After(sess.UpdatedAt) {
+			sess.UpdatedAt = record.CreatedAt
+		}
+		return nil
+	}
 	if typed.Type == historyTypeDisplay {
 		var marker displayRecord
 		if err := json.Unmarshal([]byte(line), &marker); err != nil {
@@ -322,6 +566,7 @@ func appendMessageRecordLine(sess *Session, line string, kind string) error {
 	}
 	msg := record.Message
 	sess.messages = append(sess.messages, &msg)
+	sess.LinkCurrent(-1, "")
 	sess.records = append(sess.records, historyRecord{kind: kind, message: &msg, messageMetadata: sanitizeMessageMetadata(record.MessageMetadata), createdAt: createdAt})
 	if createdAt.After(sess.UpdatedAt) {
 		sess.UpdatedAt = createdAt
@@ -339,6 +584,7 @@ func appendMessageLine(sess *Session, line string) error {
 	}
 	createdAt := nextLegacyMessageCreatedAt(sess)
 	sess.messages = append(sess.messages, &msg)
+	sess.LinkCurrent(-1, "")
 	sess.records = append(sess.records, historyRecord{kind: historyTypeMessage, message: &msg, createdAt: createdAt})
 	if createdAt.After(sess.UpdatedAt) {
 		sess.UpdatedAt = createdAt

@@ -29,6 +29,7 @@ type Settings struct {
 	ImageAPIModel             string                       `toml:"image_api_model,omitempty" json:"image_api_model,omitempty"`
 	DefaultImageAPIProfileID  string                       `toml:"default_image_api_profile_id,omitempty" json:"default_image_api_profile_id,omitempty"`
 	ImageAPIProfiles          []ImageAPIProfileSettings    `toml:"image_api_profiles,omitempty" json:"image_api_profiles,omitempty"`
+	ImageAnalysis             ImageAnalysisSettings        `toml:"image_analysis,omitempty" json:"image_analysis,omitempty"`
 	AgentModels               AgentModelSettings           `toml:"agent_models,omitempty" json:"agent_models,omitempty"`
 	AgentTools                AgentToolSettings            `toml:"agent_tools,omitempty" json:"agent_tools,omitempty"`
 	AgentPrompts              AgentPromptSettings          `toml:"agent_prompts,omitempty" json:"agent_prompts,omitempty"`
@@ -62,6 +63,9 @@ type Settings struct {
 	ChapterGroupMax             *int   `toml:"chapter_group_max,omitempty" json:"chapter_group_max,omitempty"`
 	VersionTimedEnabled         *bool  `toml:"version_timed_enabled,omitempty" json:"version_timed_enabled,omitempty"`
 	VersionTimedIntervalMinutes *int   `toml:"version_timed_interval_minutes,omitempty" json:"version_timed_interval_minutes,omitempty"`
+	// CheckpointAutoIntervalMinutes 限制自动检查点（每轮 run 成功后）的最小创建间隔，
+	// 避免高频对话产生大量 git 版本。0 表示不节流（每轮都创建）。默认 5 分钟。
+	CheckpointAutoIntervalMinutes *int `toml:"checkpoint_auto_interval_minutes,omitempty" json:"checkpoint_auto_interval_minutes,omitempty"`
 
 	// 外观
 	UIFontFamily       string `toml:"ui_font_family,omitempty" json:"ui_font_family,omitempty"`
@@ -74,18 +78,21 @@ type Settings struct {
 	UpdateCheckEnabled *bool  `toml:"update_check_enabled,omitempty" json:"update_check_enabled,omitempty"`
 
 	// Agent
-	MaxIteration            *int   `toml:"max_iteration,omitempty" json:"max_iteration,omitempty"`
-	ModelMaxRetries         *int   `toml:"model_max_retries,omitempty" json:"model_max_retries,omitempty"`
-	AgentIdleTimeoutSeconds *int   `toml:"agent_idle_timeout_seconds,omitempty" json:"agent_idle_timeout_seconds,omitempty"`
-	AgentToolResultLimitKB  *int   `toml:"agent_tool_result_limit_kb,omitempty" json:"agent_tool_result_limit_kb,omitempty"`
-	LLMInputLogEnabled      *bool  `toml:"llm_input_log_enabled,omitempty" json:"llm_input_log_enabled,omitempty"`
-	TraceCaptureLevel       string `toml:"trace_capture_level,omitempty" json:"trace_capture_level,omitempty"`
-	TraceExporter           string `toml:"trace_exporter,omitempty" json:"trace_exporter,omitempty"`
-	TraceRetentionRuns      *int   `toml:"trace_retention_runs,omitempty" json:"trace_retention_runs,omitempty"`
-	PlanModeDefault         *bool  `toml:"plan_mode_default,omitempty" json:"plan_mode_default,omitempty"`
-	IDEStoryTellerID        string `toml:"ide_story_teller_id,omitempty" json:"ide_story_teller_id,omitempty"`
-	IDEImagePresetID        string `toml:"ide_image_preset_id,omitempty" json:"ide_image_preset_id,omitempty"`
-	WritingSkillDefault     string `toml:"writing_skill_default,omitempty" json:"writing_skill_default,omitempty"`
+	MaxIteration            *int `toml:"max_iteration,omitempty" json:"max_iteration,omitempty"`
+	ModelMaxRetries         *int `toml:"model_max_retries,omitempty" json:"model_max_retries,omitempty"`
+	AgentIdleTimeoutSeconds *int `toml:"agent_idle_timeout_seconds,omitempty" json:"agent_idle_timeout_seconds,omitempty"`
+	AgentToolResultLimitKB  *int `toml:"agent_tool_result_limit_kb,omitempty" json:"agent_tool_result_limit_kb,omitempty"`
+	// AgentToolResultBatchLimitKB 限制一条 assistant 消息内所有并行工具结果总和（字节）。
+	// 对应 Claude Code MAX_TOOL_RESULTS_PER_MESSAGE_CHARS。0=不设置聚合上限。默认 256 KB。
+	AgentToolResultBatchLimitKB *int   `toml:"agent_tool_result_batch_limit_kb,omitempty" json:"agent_tool_result_batch_limit_kb,omitempty"`
+	LLMInputLogEnabled          *bool  `toml:"llm_input_log_enabled,omitempty" json:"llm_input_log_enabled,omitempty"`
+	TraceCaptureLevel           string `toml:"trace_capture_level,omitempty" json:"trace_capture_level,omitempty"`
+	TraceExporter               string `toml:"trace_exporter,omitempty" json:"trace_exporter,omitempty"`
+	TraceRetentionRuns          *int   `toml:"trace_retention_runs,omitempty" json:"trace_retention_runs,omitempty"`
+	PlanModeDefault             *bool  `toml:"plan_mode_default,omitempty" json:"plan_mode_default,omitempty"`
+	IDEStoryTellerID            string `toml:"ide_story_teller_id,omitempty" json:"ide_story_teller_id,omitempty"`
+	IDEImagePresetID            string `toml:"ide_image_preset_id,omitempty" json:"ide_image_preset_id,omitempty"`
+	WritingSkillDefault         string `toml:"writing_skill_default,omitempty" json:"writing_skill_default,omitempty"`
 
 	// 游戏模式
 	InteractiveStageFontSize   *int     `toml:"interactive_stage_font_size,omitempty" json:"interactive_stage_font_size,omitempty"`
@@ -101,6 +108,7 @@ const (
 	DefaultWritingSkillName        = "novel-lite"
 	DefaultAgentIdleTimeoutSeconds = 0
 	DefaultAgentToolResultLimitKB  = 1024
+	DefaultAgentToolResultBatchKB  = 256
 	DefaultTraceCaptureLevel       = "summary"
 	DefaultTraceExporter           = "local"
 	DefaultTraceRetentionRuns      = 100
@@ -109,43 +117,45 @@ const (
 // DefaultSettings 返回内置默认配置（最低优先级）。
 func DefaultSettings() Settings {
 	return Settings{
-		OpenAIBaseURL:               "https://api.deepseek.com",
-		OpenAIModel:                 "deepseek-v4-pro",
-		OpenAIContextWindowTokens:   intPtr(DefaultContextWindowTokens),
-		ImageAPIBaseURL:             DefaultImageAPIBaseURL,
-		ImageAPIModel:               DefaultImageAPIModel,
-		DefaultImageAPIProfileID:    DefaultImageAPIProfileID,
-		SkillsDir:                   "./skills",
-		DenovaDir:                   "./" + workspacepath.DataDirName,
-		NovaDir:                     "./" + workspacepath.DataDirName,
-		BackendPort:                 intPtr(8080),
-		FrontendPort:                intPtr(5173),
-		AllowLANAccess:              boolPtr(false),
-		AutoSaveEnabled:             boolPtr(true),
-		AutoSaveIntervalMs:          intPtr(1500),
-		HideChapterBodyLiveOutput:   boolPtr(false),
-		ChapterFilenameFormat:       "ch{order:05}-{chapter}-{title}.md",
-		VolumeDirFormat:             "v{order:05}-{volume}",
-		MaxOpenTabs:                 intPtr(5),
-		ChapterGroupMin:             intPtr(3),
-		ChapterGroupMax:             intPtr(8),
-		VersionTimedEnabled:         boolPtr(true),
-		VersionTimedIntervalMinutes: intPtr(10),
-		UIFontFamily:                "apple-system",
-		UIFontSize:                  intPtr(14),
-		ReadingFontFamily:           "source-han-serif",
-		ReadingFontSize:             intPtr(18),
-		Language:                    "auto",
-		Theme:                       "dark",
-		MotionIntensity:             "system",
-		UpdateCheckEnabled:          boolPtr(true),
-		ModelMaxRetries:             intPtr(5),
-		AgentIdleTimeoutSeconds:     intPtr(DefaultAgentIdleTimeoutSeconds),
-		AgentToolResultLimitKB:      intPtr(DefaultAgentToolResultLimitKB),
-		LLMInputLogEnabled:          boolPtr(false),
-		TraceCaptureLevel:           DefaultTraceCaptureLevel,
-		TraceExporter:               DefaultTraceExporter,
-		TraceRetentionRuns:          intPtr(DefaultTraceRetentionRuns),
+		OpenAIBaseURL:                 "https://api.deepseek.com",
+		OpenAIModel:                   "deepseek-v4-pro",
+		OpenAIContextWindowTokens:     intPtr(DefaultContextWindowTokens),
+		ImageAPIBaseURL:               DefaultImageAPIBaseURL,
+		ImageAPIModel:                 DefaultImageAPIModel,
+		DefaultImageAPIProfileID:      DefaultImageAPIProfileID,
+		SkillsDir:                     "./skills",
+		DenovaDir:                     "./" + workspacepath.DataDirName,
+		NovaDir:                       "./" + workspacepath.DataDirName,
+		BackendPort:                   intPtr(8080),
+		FrontendPort:                  intPtr(5173),
+		AllowLANAccess:                boolPtr(false),
+		AutoSaveEnabled:               boolPtr(true),
+		AutoSaveIntervalMs:            intPtr(1500),
+		HideChapterBodyLiveOutput:     boolPtr(false),
+		ChapterFilenameFormat:         "ch{order:05}-{chapter}-{title}.md",
+		VolumeDirFormat:               "v{order:05}-{volume}",
+		MaxOpenTabs:                   intPtr(5),
+		ChapterGroupMin:               intPtr(3),
+		ChapterGroupMax:               intPtr(8),
+		VersionTimedEnabled:           boolPtr(true),
+		VersionTimedIntervalMinutes:   intPtr(10),
+		CheckpointAutoIntervalMinutes: intPtr(5),
+		UIFontFamily:                  "apple-system",
+		UIFontSize:                    intPtr(14),
+		ReadingFontFamily:             "source-han-serif",
+		ReadingFontSize:               intPtr(18),
+		Language:                      "auto",
+		Theme:                         "dark",
+		MotionIntensity:               "system",
+		UpdateCheckEnabled:            boolPtr(true),
+		ModelMaxRetries:               intPtr(5),
+		AgentIdleTimeoutSeconds:       intPtr(DefaultAgentIdleTimeoutSeconds),
+		AgentToolResultLimitKB:        intPtr(DefaultAgentToolResultLimitKB),
+		AgentToolResultBatchLimitKB:   intPtr(DefaultAgentToolResultBatchKB),
+		LLMInputLogEnabled:            boolPtr(false),
+		TraceCaptureLevel:             DefaultTraceCaptureLevel,
+		TraceExporter:                 DefaultTraceExporter,
+		TraceRetentionRuns:            intPtr(DefaultTraceRetentionRuns),
 		AgentModels: AgentModelSettings{
 			IDE:              AgentModelOverride{EnableThinking: boolPtr(true)},
 			InteractiveStory: AgentModelOverride{EnableThinking: boolPtr(false)},
@@ -197,6 +207,7 @@ func Merge(parent, child Settings) Settings {
 		out.DefaultImageAPIProfileID = child.DefaultImageAPIProfileID
 	}
 	out.ImageAPIProfiles = mergeImageAPIProfiles(out.ImageAPIProfiles, child.ImageAPIProfiles)
+	out.ImageAnalysis = mergeImageAnalysisSettings(out.ImageAnalysis, child.ImageAnalysis)
 	out.AgentModels = MergeAgentModelSettings(out.AgentModels, child.AgentModels)
 	out.AgentTools = MergeAgentToolSettings(out.AgentTools, child.AgentTools)
 	out.AgentPrompts = MergeAgentPromptSettings(out.AgentPrompts, child.AgentPrompts)
@@ -261,6 +272,9 @@ func Merge(parent, child Settings) Settings {
 	if child.VersionTimedIntervalMinutes != nil {
 		out.VersionTimedIntervalMinutes = child.VersionTimedIntervalMinutes
 	}
+	if child.CheckpointAutoIntervalMinutes != nil {
+		out.CheckpointAutoIntervalMinutes = child.CheckpointAutoIntervalMinutes
+	}
 	if child.UIFontFamily != "" {
 		out.UIFontFamily = child.UIFontFamily
 	}
@@ -296,6 +310,9 @@ func Merge(parent, child Settings) Settings {
 	}
 	if child.AgentToolResultLimitKB != nil {
 		out.AgentToolResultLimitKB = child.AgentToolResultLimitKB
+	}
+	if child.AgentToolResultBatchLimitKB != nil {
+		out.AgentToolResultBatchLimitKB = child.AgentToolResultBatchLimitKB
 	}
 	if child.LLMInputLogEnabled != nil {
 		out.LLMInputLogEnabled = child.LLMInputLogEnabled
@@ -668,6 +685,18 @@ func normalizeAgentToolResultLimitKB(limit *int) *int {
 	}
 	if *limit == 0 {
 		return intPtr(DefaultAgentToolResultLimitKB)
+	}
+	return limit
+}
+
+// normalizeAgentToolResultBatchLimitKB 把聚合上限归一：nil→nil、0→0（不设置聚合上限）、
+// 负数→nil、正数保留。与单结果上限不同，0 表示"不限"而非默认值。
+func normalizeAgentToolResultBatchLimitKB(limit *int) *int {
+	if limit == nil {
+		return nil
+	}
+	if *limit < 0 {
+		return nil
 	}
 	return limit
 }

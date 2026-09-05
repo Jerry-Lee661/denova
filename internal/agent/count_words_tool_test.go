@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cloudwego/eino/components/tool"
@@ -167,5 +168,56 @@ func TestCountWordsToolRejectsNeitherInput(t *testing.T) {
 	_, err = invokable.InvokableRun(context.Background(), `{}`)
 	if err == nil {
 		t.Fatal("expected error when neither text nor file_path provided")
+	}
+}
+
+func TestCountWordsToolAcceptsAliasAndRelativePath(t *testing.T) {
+	workspace := t.TempDir()
+	writeAgentChapter(t, workspace, "chapters/ch00001-正文.md")
+	base, err := newCountWordsTool(workspace)
+	if err != nil {
+		t.Fatalf("newCountWordsTool: %v", err)
+	}
+	invokable := base.(tool.InvokableTool)
+
+	// @ch1 别名
+	raw, err := invokable.InvokableRun(context.Background(), `{"file_path":"@ch1"}`)
+	if err != nil {
+		t.Fatalf("@ch1 count failed: %v", err)
+	}
+	var res countWordsResult
+	if err := json.Unmarshal([]byte(raw), &res); err != nil {
+		t.Fatalf("unmarshal @ch1 result: %v", err)
+	}
+	if res.ChineseChars != 4 {
+		t.Fatalf("@ch1 ChineseChars = %d, want 4（正文内容）", res.ChineseChars)
+	}
+
+	// 相对路径
+	if _, err := invokable.InvokableRun(context.Background(), `{"file_path":"chapters/ch00001-正文.md"}`); err != nil {
+		t.Fatalf("relative path count failed: %v", err)
+	}
+}
+
+func TestCountWordsToolToleratesLostCJKAndURLEncoded(t *testing.T) {
+	workspace := t.TempDir()
+	writeAgentChapter(t, workspace, "chapters/ch00001-正文.md")
+	base, err := newCountWordsTool(workspace)
+	if err != nil {
+		t.Fatalf("newCountWordsTool: %v", err)
+	}
+	invokable := base.(tool.InvokableTool)
+
+	// 模型丢失 CJK 字符：ch00001-正文.md → ch00001-.md，靠前缀唯一回退。
+	if _, err := invokable.InvokableRun(context.Background(), `{"file_path":"chapters/ch00001-.md"}`); err != nil {
+		t.Fatalf("lost-CJK variant should fall back: %v", err)
+	}
+	// URL 编码：正文 → %E6%AD%A3%E6%96%87。
+	if _, err := invokable.InvokableRun(context.Background(), `{"file_path":"chapters/ch00001-%E6%AD%A3%E6%96%87.md"}`); err != nil {
+		t.Fatalf("URL-encoded variant should fall back: %v", err)
+	}
+	// 目录应给出「用 ls」的明确提示而非 Incorrect function。
+	if _, err := invokable.InvokableRun(context.Background(), `{"file_path":"chapters"}`); err == nil || !strings.Contains(err.Error(), "is a directory, not a file") {
+		t.Fatalf("directory should produce ls hint, got: %v", err)
 	}
 }

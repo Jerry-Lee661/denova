@@ -20,6 +20,15 @@ openai_base_url = "https://api.deepseek.com"
 openai_api_key = ""
 openai_model = "deepseek-v4-pro"
 
+# 本地 Qwen3.5-9B 视觉模型（llama.cpp，端口 8186），用于图片分析 OCR/台词提取
+[[model_profiles]]
+id = "Qwen3.5-9B"
+name = "Qwen3.5-9B 识图"
+openai_base_url = "http://127.0.0.1:8186/v1"
+openai_api_key = "not-needed"
+openai_model = "qwen3.5-9b"
+default_for_image_analysis = true
+
 # 可选：配置更多 OpenAI 协议兼容平台，并按 Agent 分配。模型名同时作为配置名，name 可作为显示别名。
 # [[model_profiles]]
 # openai_base_url = "https://api.openai.com/v1"
@@ -61,6 +70,37 @@ openai_api_key = ""
 openai_model = "gpt-image-1"
 default_quality = "auto"
 default_output_format = "png"
+
+# 图片分析管线行为配置。全部可选，未设置时使用默认值。
+[image_analysis]
+# 分镜密集页面启用两阶段提取（先枚举分镜再逐格深度提取）。12B 级模型推荐开启。默认 true。
+panel_aware_extraction = true
+# 注入前一页摘要的字符上限，用于跨页剧情连续性。0 关闭。默认 500。
+prev_page_summary_chars = 800
+# 单页第二阶段处理的最大分镜数（超过则截断，防止 token 爆炸）。默认 20。
+max_panels_per_request = 30
+# 视觉模型单次响应的 max_tokens 上限。默认 8192。
+max_response_tokens = 8192
+# 视觉模型单次 HTTP 请求的超时秒数。本地推理模型（先思考后回答）单次生成可能超过 3 分钟，
+# 硬编码 180s 会切断长生成。默认 360。设为 0 表示不设置超时（无限等待）。
+request_timeout_seconds = 360
+# 发送前图片缩放的最大边长像素（默认 1600）。超过则等比缩放到该值以内，降低视觉 token 与 prefill 耗时。
+# 设为 0 表示不缩放。
+image_resize_max_dim = 1600
+# JPEG 压缩质量（1-100，默认 82）。
+image_resize_quality = 82
+# PDF 页面渲染为图片时的 DPI。默认 300。
+pdf_render_dpi = 300
+# 单批次 PDF 处理的最大页数。默认 50。
+pdf_max_pages = 50
+# 是否信任 PDF 文本层。true 时优先用文本层提取，乱序或无文本层时回退到视觉模型。默认 true。
+pdf_text_layer_trust = true
+# 书本性质预判断时抽样的页数（前 N 页拼 1 次视觉模型调用）。默认 5。
+pdf_classify_sample_pages = 5
+# 批次结束后原始上传图片的保留分钟数。保留期内可随时切换模型重测或重试失败页，
+# 超期后在应用启动或新建批次时被自动清理。默认 1440（24 小时）。0 表示永不自动清理，
+# 只能通过面板上的"清理图片"按钮手动回收。
+image_retention_minutes = 1440
 #
 # 可选：为不同 Agent 叠加自定义 system prompt。
 # 自定义提示在行为、创作偏好、策略和风格上优先于 Denova 内置提示，
@@ -203,3 +243,4 @@ ide_story_teller_id = "classic"
 
 # 互动模式
 interactive_stage_line_height = 1.78
+
