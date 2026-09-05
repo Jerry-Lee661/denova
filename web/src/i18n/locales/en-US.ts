@@ -42,6 +42,7 @@ import agentChat from './en-US/agentChat'
 import agentApproval from './en-US/agentApproval'
 import files from './en-US/files'
 import trajectory from './en-US/trajectory'
+import imageAnalysis from './en-US/imageAnalysis'
 
 const enUS = {
   ...common,
@@ -88,6 +89,7 @@ const enUS = {
   ...agentApproval,
   ...files,
   ...trajectory,
+  ...imageAnalysis,
   'agents.tool.availability.runtimeCheck': 'Runtime check',
 } as const
 

@@ -8,6 +8,7 @@ import type { ToolNavigationIntent } from '@/components/Chat/tool-navigation'
 const HomeView = memo(lazy(() => import('@/components/Home/HomeView').then((module) => ({ default: module.HomeView }))))
 const AgentsView = memo(lazy(() => import('@/features/agents/AgentsView').then((module) => ({ default: module.AgentsView }))))
 const AutomationsView = memo(lazy(() => import('@/features/automations/AutomationsView').then((module) => ({ default: module.AutomationsView }))))
+const ImageAnalysisPanel = memo(lazy(() => import('@/components/ImageAnalysis/ImageAnalysisPanel').then((module) => ({ default: module.ImageAnalysisPanel }))))
 const SkillsView = memo(lazy(() => import('@/features/skills/SkillsView').then((module) => ({ default: module.SkillsView }))))
 const SettingsView = memo(lazy(() => import('@/features/settings/SettingsView').then((module) => ({ default: module.SettingsView }))))
 const TrajectoryPage = memo(lazy(() => import('@/features/trajectory/TrajectoryPage').then((module) => ({ default: module.TrajectoryPage }))))
@@ -56,6 +57,11 @@ export function SharedWorkbenchRoutes({
       {isMounted('automations') && (
         <WorkbenchRouteLayer visible={route === 'automations'} loadingLabel={loadingLabel}>
           <AutomationsView {...automations} />
+        </WorkbenchRouteLayer>
+      )}
+      {isMounted('image-analysis') && (
+        <WorkbenchRouteLayer visible={route === 'image-analysis'} loadingLabel={loadingLabel}>
+          <ImageAnalysisPanel />
         </WorkbenchRouteLayer>
       )}
       {isMounted('trajectory') && (

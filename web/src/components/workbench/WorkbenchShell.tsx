@@ -4,7 +4,7 @@ import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import { arrayMove } from '@dnd-kit/sortable'
 import { Group, Panel, Separator } from 'react-resizable-panels'
-import { BookOpen, Bot, Clock3, Database, Gamepad2, History, Menu, PanelLeft, PenLine, Route, Search, Settings, SlidersHorizontal, Sparkles, Terminal } from 'lucide-react'
+import { BookOpen, Bot, Clock3, Database, Gamepad2, History, Menu, PanelLeft, PenLine, Route, ScanText, Search, Settings, SlidersHorizontal, Sparkles, Terminal } from 'lucide-react'
 import { WorkspaceLayout } from '@/components/layout/workspace-layout'
 import { MOBILE_NAVIGATION_OPEN_EVENT, WorkspaceMobileLayout, type MobileNavItem } from '@/components/layout/workspace-mobile-layout'
 import { createStablePortalHost, StablePortalSlot } from '@/components/layout/stable-portal-slot'
@@ -202,6 +202,10 @@ export function WorkbenchShell({
     openRoute('automations')
   }
 
+  const openImageAnalysis = () => {
+    openRoute('image-analysis')
+  }
+
   const openTrajectory = () => {
     openRoute('trajectory')
   }
@@ -292,6 +296,13 @@ export function WorkbenchShell({
       onClick: openAutomations,
       active: automationsActive,
       icon: <ActivityIconBadge count={automationInboxUnread} running={automationRunning > 0}><Clock3 className="size-3" /></ActivityIconBadge>,
+    },
+    {
+      id: 'image-analysis',
+      label: t('imageAnalysis.title'),
+      onClick: openImageAnalysis,
+      active: mode === 'image-analysis' && !settingsOpen,
+      icon: <ScanText className="h-4 w-4" />,
     },
   ]
 
