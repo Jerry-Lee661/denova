@@ -7,6 +7,7 @@ import { SortableContext, arrayMove, rectSortingStrategy, sortableKeyboardCoordi
 import { CSS } from '@dnd-kit/utilities'
 import { ArrowDownUp, BookOpen, Download, FileText, Folder, GripVertical, LibraryBig, Loader2, Pencil, Plus, Trash2, Upload } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { ConfirmDialog } from '@/components/common/ConfirmDialog'
@@ -22,6 +23,7 @@ import {
   setBookSortMode,
   switchWorkspace,
   type BookRecord,
+  type BookExportFormat,
   type BookSortMode,
 } from '@/lib/api'
 import { getImagePresets } from '@/features/interactive/api'
@@ -167,11 +169,11 @@ export function HomeView({ workspace, novaDir, books, bookSortMode, onSwitch, on
     }
   }
 
-  const handleExportTxt = async (book: BookRecord) => {
+  const handleExport = async (book: BookRecord, format: BookExportFormat) => {
     if (exportingPath) return
     setExportingPath(book.path)
     try {
-      const file = await exportBook({ path: book.path, format: 'txt' })
+      const file = await exportBook({ path: book.path, format })
       downloadBookExport(file)
       toast.success(t('home.exportStarted', { filename: file.filename }))
     } catch (e) {
@@ -233,17 +235,31 @@ export function HomeView({ workspace, novaDir, books, bookSortMode, onSwitch, on
               </div>
               {currentBook && (
                 <div className="flex shrink-0 flex-wrap items-center justify-start gap-1.5 sm:justify-end">
-                  <Button
-                    type="button"
-                    size="xs"
-                    variant="ghost"
-                    className={`${ghostButtonCls} max-w-full`}
-                    disabled={Boolean(exportingPath)}
-                    onClick={() => void handleExportTxt(currentBook)}
-                  >
-                    {exportingPath === currentBook.path ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Download data-icon="inline-start" />}
-                    {exportingPath === currentBook.path ? t('home.exporting') : t('home.exportTxt')}
-                  </Button>
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <Button
+                        type="button"
+                        size="xs"
+                        variant="ghost"
+                        className={`${ghostButtonCls} max-w-full`}
+                        disabled={Boolean(exportingPath)}
+                      >
+                        {exportingPath === currentBook.path ? <Loader2 data-icon="inline-start" className="animate-spin" /> : <Download data-icon="inline-start" />}
+                        {exportingPath === currentBook.path ? t('home.exporting') : t('home.export')}
+                      </Button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuItem disabled={Boolean(exportingPath)} onSelect={() => void handleExport(currentBook, 'txt')}>
+                        {t('home.exportTxt')}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem disabled={Boolean(exportingPath)} onSelect={() => void handleExport(currentBook, 'epub')}>
+                        {t('home.exportEpub')}
+                      </DropdownMenuItem>
+                      <DropdownMenuItem disabled={Boolean(exportingPath)} onSelect={() => void handleExport(currentBook, 'docx')}>
+                        {t('home.exportDocx')}
+                      </DropdownMenuItem>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                   <div className="flex items-center gap-1.5 rounded border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-2 py-1 text-[11px] text-[var(--nova-text-muted)]">
                     <BookOpen className="h-3 w-3" />
                     {t('common.current')}
@@ -394,7 +410,7 @@ export function HomeView({ workspace, novaDir, books, bookSortMode, onSwitch, on
                                   label={exportingPath === book.path ? t('home.exporting') : t('home.exportTxt')}
                                   className={`${iconButtonCls} bg-[var(--nova-surface)] opacity-100 sm:pointer-events-none sm:opacity-0 sm:group-hover:pointer-events-auto sm:group-hover:opacity-100`}
                                   disabled={Boolean(exportingPath)}
-                                  onClick={() => void handleExportTxt(book)}
+                                  onClick={() => void handleExport(book, 'txt')}
                                 >
                                   {exportingPath === book.path ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
                                 </TooltipIconButton>

@@ -16,57 +16,95 @@ type TextExport struct {
 	ChapterCount int
 }
 
-// ExportText assembles all non-empty chapters into a single plain-text manuscript.
-func (s *Service) ExportText(meta BookMeta) (TextExport, error) {
+// ExportChapter is one exportable chapter with the volume context it appeared in.
+type ExportChapter struct {
+	Volume string
+	Title  string
+	Body   string
+}
+
+// DocumentExport is the structured manuscript shared by every export format.
+type DocumentExport struct {
+	Title        string
+	Author       string
+	Chapters     []ExportChapter
+	ChapterCount int
+}
+
+// ExportDocument assembles all non-empty chapters into a structured manuscript
+// that format-specific exporters (txt, epub, docx) render.
+func (s *Service) ExportDocument(meta BookMeta) (DocumentExport, error) {
 	summary, err := s.Summary()
 	if err != nil {
-		return TextExport{}, err
+		return DocumentExport{}, err
 	}
 
-	title := firstNonEmptyText(meta.Title, summary.Title, filepath.Base(s.workspace))
-	author := firstNonEmptyText(meta.Author, summary.Author)
-	blocks := make([]string, 0, len(summary.Chapters)*2+1)
-	headerLines := []string{}
-	if title != "" {
-		headerLines = append(headerLines, title)
-	}
-	if author != "" {
-		headerLines = append(headerLines, "作者: "+author)
-	}
-	if len(headerLines) > 0 {
-		blocks = append(blocks, strings.Join(headerLines, "\n"))
+	document := DocumentExport{
+		Title:    firstNonEmptyText(meta.Title, summary.Title, filepath.Base(s.workspace)),
+		Author:   firstNonEmptyText(meta.Author, summary.Author),
+		Chapters: make([]ExportChapter, 0, len(summary.Chapters)),
 	}
 
 	lastVolumePath := ""
-	chapterCount := 0
 	for _, chapter := range summary.Chapters {
 		if chapter.Words == 0 {
 			continue
 		}
 		content, err := s.ReadFile(chapter.Path)
 		if err != nil {
-			return TextExport{}, err
+			return DocumentExport{}, err
 		}
 		body := exportChapterBody(content, chapter.DisplayTitle)
 		if strings.TrimSpace(body) == "" {
 			continue
 		}
+		volume := ""
 		if shouldWriteExportVolume(chapter, lastVolumePath) {
-			blocks = append(blocks, chapter.Volume)
-			lastVolumePath = chapter.VolumePath
+			volume = chapter.Volume
 		}
 		if chapter.VolumePath != "" {
 			lastVolumePath = chapter.VolumePath
 		}
-		blocks = append(blocks, chapter.DisplayTitle, body)
-		chapterCount++
+		document.Chapters = append(document.Chapters, ExportChapter{
+			Volume: volume,
+			Title:  chapter.DisplayTitle,
+			Body:   body,
+		})
+		document.ChapterCount++
 	}
-	if chapterCount == 0 {
-		return TextExport{}, ErrNoExportableChapters
+	if document.ChapterCount == 0 {
+		return DocumentExport{}, ErrNoExportableChapters
+	}
+	return document, nil
+}
+
+// ExportText assembles all non-empty chapters into a single plain-text manuscript.
+func (s *Service) ExportText(meta BookMeta) (TextExport, error) {
+	document, err := s.ExportDocument(meta)
+	if err != nil {
+		return TextExport{}, err
+	}
+
+	blocks := make([]string, 0, len(document.Chapters)*3+1)
+	headerLines := []string{}
+	if document.Title != "" {
+		headerLines = append(headerLines, document.Title)
+	}
+	if document.Author != "" {
+		headerLines = append(headerLines, "作者: "+document.Author)
+	}
+	if len(headerLines) > 0 {
+		blocks = append(blocks, strings.Join(headerLines, "\n"))
+	}
+	for _, chapter := range document.Chapters {
+		if chapter.Volume != "" {
+			blocks = append(blocks, chapter.Volume)
+		}
+		blocks = append(blocks, chapter.Title, chapter.Body)
 	}
 	return TextExport{
 		Content:      strings.TrimSpace(strings.Join(blocks, "\n\n")) + "\n",
-		ChapterCount: chapterCount,
+		ChapterCount: document.ChapterCount,
 	}, nil
 }
 

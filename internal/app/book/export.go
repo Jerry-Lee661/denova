@@ -18,6 +18,10 @@ type BookExportFormat string
 const (
 	// BookExportFormatTXT exports a plain UTF-8 text manuscript.
 	BookExportFormatTXT BookExportFormat = "txt"
+	// BookExportFormatEPUB exports an EPUB 3 e-book package.
+	BookExportFormatEPUB BookExportFormat = "epub"
+	// BookExportFormatDOCX exports an OOXML Word document with heading styles.
+	BookExportFormatDOCX BookExportFormat = "docx"
 )
 
 // BookExportRequest describes a format-specific book export request.
@@ -65,6 +69,26 @@ func (service *Service) Export(req BookExportRequest) (BookExportResult, error) 
 			Data:         []byte(result.Content),
 			ChapterCount: result.ChapterCount,
 		}, nil
+	case BookExportFormatEPUB:
+		data, err := book.NewService(absPath).ExportEPUB(meta)
+		if err != nil {
+			return BookExportResult{}, err
+		}
+		return BookExportResult{
+			Filename:    bookExportFilename(meta, absPath, format),
+			ContentType: "application/epub+zip",
+			Data:        data,
+		}, nil
+	case BookExportFormatDOCX:
+		data, err := book.NewService(absPath).ExportDOCX(meta)
+		if err != nil {
+			return BookExportResult{}, err
+		}
+		return BookExportResult{
+			Filename:    bookExportFilename(meta, absPath, format),
+			ContentType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+			Data:        data,
+		}, nil
 	default:
 		return BookExportResult{}, fmt.Errorf("%w: %s", ErrUnsupportedBookExportFormat, req.Format)
 	}
@@ -74,6 +98,10 @@ func normalizeBookExportFormat(format BookExportFormat) BookExportFormat {
 	switch BookExportFormat(strings.ToLower(strings.TrimSpace(string(format)))) {
 	case BookExportFormatTXT:
 		return BookExportFormatTXT
+	case BookExportFormatEPUB:
+		return BookExportFormatEPUB
+	case BookExportFormatDOCX:
+		return BookExportFormatDOCX
 	default:
 		return ""
 	}
