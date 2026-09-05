@@ -16,6 +16,10 @@ const (
 	AgentKindVersionSummary = "version_summary"
 	AgentKindToolAgent      = "tool_agent"
 	AgentKindImage          = "image"
+	// AgentKindImageAnalysis routes vision model resolution for the batch image
+	// analysis pipeline (internal/imageanalysis). It has no DeepAgent runtime of
+	// its own; per-batch overrides address model profiles directly.
+	AgentKindImageAnalysis = "image_analysis"
 	// AgentKindAutomation is retained only to decode Beta runtime journals.
 	// New automation turns always run as their owning Project Agent.
 	AgentKindAutomation = "automation"

@@ -36,6 +36,7 @@ type Settings struct {
 	DefaultImageAPIProfileID string                       `toml:"default_image_api_profile_id,omitempty" json:"default_image_api_profile_id,omitempty"`
 	ImageAPIEndpoints        []ImageAPIEndpointSettings   `toml:"image_api_endpoints,omitempty" json:"image_api_endpoints,omitempty"`
 	ImageAPIProfiles         []ImageAPIProfileSettings    `toml:"image_api_profiles,omitempty" json:"image_api_profiles,omitempty"`
+	ImageAnalysis            ImageAnalysisSettings        `toml:"image_analysis,omitempty" json:"image_analysis,omitempty"`
 	AgentModels              AgentModelSettings           `toml:"agent_models,omitempty" json:"agent_models,omitempty"`
 	AgentTools               AgentToolSettings            `toml:"agent_tools,omitempty" json:"agent_tools,omitempty"`
 	AgentPrompts             AgentPromptSettings          `toml:"agent_prompts,omitempty" json:"agent_prompts,omitempty"`
@@ -270,6 +271,7 @@ func Merge(parent, child Settings) Settings {
 	}
 	out.ImageAPIEndpoints = mergeImageAPIEndpoints(out.ImageAPIEndpoints, child.ImageAPIEndpoints)
 	out.ImageAPIProfiles = mergeImageAPIProfiles(out.ImageAPIProfiles, child.ImageAPIProfiles)
+	out.ImageAnalysis = MergeImageAnalysisSettings(out.ImageAnalysis, child.ImageAnalysis)
 	out.AgentModels = MergeAgentModelSettings(out.AgentModels, child.AgentModels)
 	out.AgentTools = MergeAgentToolSettings(out.AgentTools, child.AgentTools)
 	out.AgentPrompts = MergeAgentPromptSettings(out.AgentPrompts, child.AgentPrompts)

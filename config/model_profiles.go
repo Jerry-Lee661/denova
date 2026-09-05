@@ -107,41 +107,8 @@ func ResolveAgentModel(cfg *Config, agentKind string) ResolvedModelSettings {
 	if cfg == nil {
 		return ResolvedModelSettings{}
 	}
-	legacyProfile := legacyModelProfile(cfg)
-	profiles := map[string]ModelProfileSettings{
-		"default": legacyProfile,
-	}
-	for _, profile := range cfg.ModelProfiles {
-		id := modelProfileID(profile)
-		if id == "" {
-			continue
-		}
-		profile = modelProfileWithEndpoint(cfg, profile)
-		base := profiles[id]
-		profile = normalizeModelProfileRouting(profile)
-		profile.ID = id
-		profiles[id] = mergeModelProfile(base, profile)
-	}
+	profiles := buildModelProfileMap(cfg)
 	defaultProfile := profiles["default"]
-	if defaultProfile.BaseURL == "" {
-		if defaultProfile.Provider == "" {
-			defaultProfile.BaseURL = cfg.OpenAIBaseURL
-		}
-	}
-	if defaultProfile.APIKey == "" && sameModelCredentialScope(defaultProfile, legacyProfile) {
-		defaultProfile.APIKey = legacyProfile.APIKey
-	}
-	if defaultProfile.Model == "" {
-		defaultProfile.Model = cfg.OpenAIModel
-	}
-	if defaultProfile.ContextWindowTokens == nil {
-		contextWindowTokens := cfg.OpenAIContextWindowTokens
-		if contextWindowTokens <= 0 {
-			contextWindowTokens = DefaultContextWindowTokens
-		}
-		defaultProfile.ContextWindowTokens = intPtr(contextWindowTokens)
-	}
-	profiles["default"] = defaultProfile
 
 	defaultOverride := cfg.AgentModels.Default
 	agentOverride := mergeAgentModelOverride(defaultOverride, agentModelOverrideFor(cfg.AgentModels, agentKind))
@@ -194,6 +161,105 @@ func ResolveAgentModel(cfg *Config, agentKind string) ResolvedModelSettings {
 		ContextWindowTokens: *profile.ContextWindowTokens,
 		MaxTokens:           profile.MaxTokens,
 		ThinkingLevel:       resolvedThinkingLevel(agentOverride.ThinkingLevel),
+	}
+}
+
+// buildModelProfileMap resolves the effective profile map keyed by normalized
+// profile ID, with the legacy default profile materialized under "default"
+// and blank endpoint fields inherited from top-level OpenAI settings.
+func buildModelProfileMap(cfg *Config) map[string]ModelProfileSettings {
+	legacyProfile := legacyModelProfile(cfg)
+	profiles := map[string]ModelProfileSettings{
+		"default": legacyProfile,
+	}
+	for _, profile := range cfg.ModelProfiles {
+		id := modelProfileID(profile)
+		if id == "" {
+			continue
+		}
+		profile = modelProfileWithEndpoint(cfg, profile)
+		base := profiles[id]
+		profile = normalizeModelProfileRouting(profile)
+		profile.ID = id
+		profiles[id] = mergeModelProfile(base, profile)
+	}
+	defaultProfile := profiles["default"]
+	if defaultProfile.BaseURL == "" {
+		if defaultProfile.Provider == "" {
+			defaultProfile.BaseURL = cfg.OpenAIBaseURL
+		}
+	}
+	if defaultProfile.APIKey == "" && sameModelCredentialScope(defaultProfile, legacyProfile) {
+		defaultProfile.APIKey = legacyProfile.APIKey
+	}
+	if defaultProfile.Model == "" {
+		defaultProfile.Model = cfg.OpenAIModel
+	}
+	if defaultProfile.ContextWindowTokens == nil {
+		contextWindowTokens := cfg.OpenAIContextWindowTokens
+		if contextWindowTokens <= 0 {
+			contextWindowTokens = DefaultContextWindowTokens
+		}
+		defaultProfile.ContextWindowTokens = intPtr(contextWindowTokens)
+	}
+	profiles["default"] = defaultProfile
+	return profiles
+}
+
+// ResolveProfileModel resolves a stored model profile by ID with the same
+// default-profile fallback rules as ResolveAgentModel. Used by callers that
+// address a profile directly (e.g. the batch image analysis vision model
+// override) instead of going through an agent kind.
+func ResolveProfileModel(cfg *Config, profileID string) ResolvedModelSettings {
+	if cfg == nil {
+		return ResolvedModelSettings{}
+	}
+	profiles := buildModelProfileMap(cfg)
+	defaultProfile := profiles["default"]
+	id := normalizeModelProfileID(profileID)
+	if id == "" {
+		id = "default"
+	}
+	profile, ok := profiles[id]
+	if !ok {
+		id = "default"
+		profile = defaultProfile
+	}
+	if profile.Provider == "" {
+		profile.Provider = defaultProfile.Provider
+	}
+	if profile.Protocol == "" {
+		if profile.Provider == "" || profile.Provider == defaultProfile.Provider {
+			profile.Protocol = defaultProfile.Protocol
+		}
+	}
+	if profile.BaseURL == "" {
+		if profile.Provider == "" || profile.Provider == defaultProfile.Provider {
+			profile.BaseURL = defaultProfile.BaseURL
+		}
+	}
+	if profile.APIKey == "" && sameModelCredentialScope(profile, defaultProfile) {
+		profile.APIKey = defaultProfile.APIKey
+	}
+	if profile.Model == "" {
+		profile.Model = defaultProfile.Model
+	}
+	if profile.ContextWindowTokens == nil {
+		profile.ContextWindowTokens = defaultProfile.ContextWindowTokens
+	}
+	return ResolvedModelSettings{
+		ProfileID:           id,
+		Provider:            profile.Provider,
+		Protocol:            profile.Protocol,
+		APIKey:              profile.APIKey,
+		BaseURL:             profile.BaseURL,
+		Model:               profile.Model,
+		Headers:             cloneModelProfileHeaders(profile.Headers),
+		ProtocolOptions:     cloneModelProfileOptions(profile.ProtocolOptions),
+		SessionKeyMapping:   cloneModelProfileSessionKeyMapping(profile.SessionKeyMapping),
+		Temperature:         profile.Temperature,
+		ContextWindowTokens: *profile.ContextWindowTokens,
+		MaxTokens:           profile.MaxTokens,
 	}
 }
 
