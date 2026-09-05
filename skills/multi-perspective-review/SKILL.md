@@ -28,12 +28,12 @@ Run each perspective as a separate pass. When SubAgent delegation is available, 
 
 **Pass 2 — Editor.** Optimize for structural integrity and commercial viability.
 - Continuity: contradictions with the outline, character states, or earlier chapters; name, geography, and timeline errors.
-- Stakes: are consequences real and tracked? Any promised payoff (伏笔) with no visible anchor?
+- Stakes: are consequences real and tracked? Any promised foreshadowing with no visible anchor?
 - Scene purpose: for each scene, one line stating what changes; scenes where nothing changes are cut-or-merge candidates.
 - Market fit: chapter ending strength, length relative to platform norms, title/blurb promises kept.
 
 **Pass 3 — Peer author.** Optimize for craft, peer-to-peer, blunt but specific.
-- Prose: repeated sentence rhythms, weak verbs, filter words (他看到、她感觉到), stock phrases.
+- Prose: repeated sentence rhythms, weak verbs, filter words (perception verbs that narrate what a character sees or feels instead of the thing itself), stock phrases.
 - Dialogue: does each speaker have distinct voice? Tags and beats varied? Subtext present?
 - Show vs tell: passages that narrate conclusions instead of dramatizing them.
 - Technique choices: POV consistency, tense consistency, info-dump detection.

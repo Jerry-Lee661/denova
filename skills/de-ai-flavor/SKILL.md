@@ -20,13 +20,13 @@ Rewrite AI-flavored prose so it reads like a human author wrote it, while preser
 
 Scan for these families of AI tells and record line references:
 
-- **Stock imagery and gestures**: repeated crutches such as 眼底闪过一丝、嘴角勾起一抹弧度、空气仿佛凝固、不易察觉的; in English, "a mix of X and Y", "something shifted", "he let out a breath he didn't know he was holding".
-- **AI-vocabulary tells**: 值得注意的是、某种程度上、与其说…不如说 stacked twice in one scene; English words like "delve", "tapestry", "testament to", "palpable", "couldn't help but".
+- **Stock imagery and gestures**: formulaic micro-gestures reused as filler beats — glinting eyes, a curling mouth corner, frozen air, an unnoticed smile. Search the target language's common phrasings for each family (in Chinese webnovels these are fixed four-to-eight character templates; in English, "a glint passed through", "something shifted in their eyes", "he let out a breath he didn't know he was holding").
+- **AI-vocabulary tells**: register words that correlate with machine drafting. In Chinese: hedging frameworks ("it's worth noting that", "rather than saying... it's better to say") used more than once per scene. In English: "delve", "tapestry", "testament to", "palpable", "couldn't help but", "a mix of X and Y".
 - **Rhythm monotony**: paragraphs of near-identical length, every paragraph three sentences, sentences that always end on the stressed abstract noun.
-- **Over-parallelism**: triplet lists in almost every paragraph; "不是…而是…" (or "not X but Y") used more than once per scene.
-- **Narrated emotion**: feelings announced (他感到愤怒、她心中一暖) instead of shown through action, sensation, or dialogue.
+- **Over-parallelism**: triplet lists in almost every paragraph; "not X but Y" constructions (and their Chinese equivalents) stacked back to back.
+- **Narrated emotion**: feelings announced (he felt anger, warmth rose in her heart) instead of shown through action, sensation, or dialogue.
 - **Over-explanation**: the text explains a motivation the reader already inferred, or restates the previous beat in new words.
-- **Polished-voice dialogue**: every character speaks in complete, balanced sentences with no interruption, dialect, or subtext; dialogue tags limited to 说道 / said variants.
+- **Polished-voice dialogue**: every character speaks in complete, balanced sentences with no interruption, dialect, or subtext; dialogue tags limited to one said-variant.
 
 ## Rewrite rules
 
