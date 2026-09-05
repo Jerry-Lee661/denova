@@ -342,6 +342,11 @@ func workspaceToolsFactory(workspace, projectStoreRoot string, metadata Workspac
 				return nil, fmt.Errorf("create grep tool: %w", err)
 			}
 			definitions = append(definitions, globDefinition, grepDefinition)
+			countWordsDefinition, err := CountWords(workspace)
+			if err != nil {
+				return nil, fmt.Errorf("create count_words tool: %w", err)
+			}
+			definitions = append(definitions, countWordsDefinition)
 		}
 		for _, binding := range enabledReadAdapters {
 			readAdapters = append(readAdapters, binding.adapter)
