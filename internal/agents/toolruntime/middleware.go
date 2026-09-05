@@ -11,6 +11,7 @@ import (
 	agent "github.com/alfredxw/denova/agent"
 
 	"denova/config"
+	"denova/internal/agents/skills"
 	"denova/internal/agents/toolresult"
 	producttools "denova/internal/agents/tools"
 )
@@ -29,6 +30,7 @@ type OrchestratorMiddleware struct {
 	workspace           string
 	toolResultMaxBytes  int
 	executionGate       *toolExecutionGate
+	skillGuards         []skills.SkillGuard
 }
 
 // OrchestratorConfig declares the product policy applied around every tool
@@ -41,6 +43,7 @@ type OrchestratorConfig struct {
 	EnforceToolSettings bool
 	Workspace           string
 	ToolResultMaxBytes  int
+	SkillGuards         []skills.SkillGuard
 }
 
 func NewOrchestratorMiddleware(cfg OrchestratorConfig) *OrchestratorMiddleware {
@@ -53,6 +56,7 @@ func NewOrchestratorMiddleware(cfg OrchestratorConfig) *OrchestratorMiddleware {
 		workspace:           cfg.Workspace,
 		toolResultMaxBytes:  cfg.ToolResultMaxBytes,
 		executionGate:       sharedToolExecutionGate(cfg.Workspace),
+		skillGuards:         cfg.SkillGuards,
 	}
 }
 
@@ -66,7 +70,7 @@ func (m *OrchestratorMiddleware) Configuration() OrchestratorConfig {
 	return OrchestratorConfig{
 		AgentKind: m.agentKind, PolicyKind: m.effectivePolicyKind(), ToolSettings: m.toolSettings,
 		EnforceToolSettings: m.enforceToolSettings, Workspace: m.workspace,
-		ToolResultMaxBytes: m.toolResultLimitBytes(),
+		ToolResultMaxBytes: m.toolResultLimitBytes(), SkillGuards: m.skillGuards,
 	}
 }
 
@@ -354,6 +358,9 @@ func (m *OrchestratorMiddleware) buildToolDecision(ctx context.Context, toolCtx 
 	if m != nil && m.enforceToolSettings && manifest.Capability != "" && !config.AgentToolAllowed(m.toolSettings, manifest.Capability) {
 		decision.Action = "blocked"
 		decision.Reason = disabledToolCapabilityMessage(manifest.Name, manifest.Capability)
+	}
+	if decision.Action == "allowed" {
+		m.applySkillGuards(&decision)
 	}
 	return decision
 }

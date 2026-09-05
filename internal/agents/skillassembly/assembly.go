@@ -15,12 +15,15 @@ import (
 	producttools "denova/internal/agents/tools"
 )
 
-// Assembly contains the three runtime surfaces derived from one effective
+// Assembly contains the runtime surfaces derived from one effective
 // catalog. SystemPrompt remains unchanged when Skills are unavailable.
 type Assembly struct {
 	SystemPrompt prompts.SystemPromptComposition
 	Tools        []agent.ToolDefinition
 	ReadAdapters []producttools.ReadAdapterBinding
+	// Guards collects the workflow guards declared by every Skill visible to
+	// this Agent. Enforcement lives in the tool runtime, not in Skills.
+	Guards []novaskills.SkillGuard
 }
 
 // Build resolves one Agent's effective catalog for prompt assembly and wires
@@ -52,6 +55,10 @@ func Build(
 	}
 	if len(available) == 0 {
 		return assembly, nil
+	}
+
+	for _, item := range available {
+		assembly.Guards = append(assembly.Guards, item.Guards...)
 	}
 
 	entries := make([]prompts.SkillCatalogEntry, 0, len(available))

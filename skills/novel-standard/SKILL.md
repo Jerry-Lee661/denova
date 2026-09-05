@@ -5,6 +5,12 @@ category: writing
 capabilities:
   - writing-workflow
 agent: ide
+guards:
+  - id: require_outline
+    mode: block
+    check: require_file
+    path: setting/outline.md
+    target_prefix: chapters/
 ---
 
 # novel-standard

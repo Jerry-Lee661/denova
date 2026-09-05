@@ -31,13 +31,38 @@ const (
 // in the product Skills module so the catalog is independent from any Agent
 // framework implementation.
 type FrontMatter struct {
-	Name         string      `yaml:"name"`
-	Description  string      `yaml:"description"`
-	Category     string      `yaml:"category"`
-	Capabilities []string    `yaml:"capabilities"`
-	Context      ContextMode `yaml:"context"`
-	Agent        string      `yaml:"agent"`
-	Model        string      `yaml:"model"`
+	Name         string       `yaml:"name"`
+	Description  string       `yaml:"description"`
+	Category     string       `yaml:"category"`
+	Capabilities []string     `yaml:"capabilities"`
+	Context      ContextMode  `yaml:"context"`
+	Agent        string       `yaml:"agent"`
+	Model        string       `yaml:"model"`
+	Guards       []SkillGuard `yaml:"guards,omitempty"`
+}
+
+// SkillGuard is one declarative workflow guard parsed from a SKILL.md
+// `guards` frontmatter entry. Guards are enforced by the tool runtime before
+// a matching tool call executes; they describe the precondition a writing
+// workflow promises to its users (for example, an outline must exist before
+// chapter files are written), not generic permissions.
+type SkillGuard struct {
+	// ID identifies the guard in enforcement messages; unique per skill.
+	ID string `yaml:"id"`
+	// Mode is "block" (default) or "warn". Warn records the violation without
+	// blocking the tool call.
+	Mode string `yaml:"mode,omitempty"`
+	// Check names the built-in precondition. Only "require_file" exists: the
+	// workspace-relative Path must exist before matching tool calls run.
+	Check string `yaml:"check"`
+	// Path is the workspace-relative file the check requires.
+	Path string `yaml:"path,omitempty"`
+	// Tools optionally restricts the guard to named tools. When empty the
+	// guard applies to every tool whose mutation scope is the workspace.
+	Tools []string `yaml:"tools,omitempty"`
+	// TargetPrefix optionally restricts the guard to calls whose extracted
+	// target path starts with this workspace-relative prefix.
+	TargetPrefix string `yaml:"target_prefix,omitempty"`
 }
 
 // HasCapability reports whether this Skill explicitly opts into a stable

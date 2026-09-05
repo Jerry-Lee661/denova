@@ -158,6 +158,11 @@ func parseRecord(ctx context.Context, dir Directory, path, data string) (record,
 	fm.Description = strings.TrimSpace(fm.Description)
 	fm.Category = normalizeCategory(fm.Category)
 	fm.Capabilities = normalizeCapabilities(fm.Capabilities)
+	guards, err := normalizeSkillGuards(fm.Guards)
+	if err != nil {
+		return record{}, fmt.Errorf("skill %s: %w", fm.Name, err)
+	}
+	fm.Guards = guards
 	if err := ValidateName(fm.Name); err != nil {
 		return record{}, err
 	}

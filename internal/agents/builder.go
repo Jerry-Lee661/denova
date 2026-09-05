@@ -476,6 +476,7 @@ func buildChatModelAgentAssembly(ctx context.Context, cfg *config.Config, spec c
 			AgentKind: spec.Kind, PolicyKind: firstNonEmpty(spec.ToolPolicyKind, spec.Kind),
 			ToolSettings: spec.ToolSettings, EnforceToolSettings: true,
 			Workspace: workspace, ToolResultMaxBytes: toolresult.LimitBytes(cfg),
+			SkillGuards: skills.Guards,
 		}),
 		agentrun.NewModelInputLoggingMiddleware(
 			spec.Kind, spec.ModelCfg, spec.ContextWindowTokens, spec.ProviderInputMaxBytes, systemPrompt,
