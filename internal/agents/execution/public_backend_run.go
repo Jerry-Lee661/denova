@@ -77,7 +77,15 @@ func loadCanonicalMessages(
 	if err != nil {
 		return err
 	}
-	return session.LoadCanonicalMessages(ctx, messages)
+	// A run killed between an assistant tool call and its results leaves the
+	// durable transcript split; import would then fail protocol validation on
+	// every later run and brick the session. Repair the projection instead.
+	repaired, dropped := repairDanglingToolHalves(messages)
+	if dropped.Calls > 0 || dropped.Messages > 0 {
+		slog.WarnContext(ctx, "[execution] canonical transcript repaired before import",
+			slog.Int("dropped_calls", dropped.Calls), slog.Int("dropped_messages", dropped.Messages))
+	}
+	return session.LoadCanonicalMessages(ctx, repaired)
 }
 
 func (backend *publicBackend) submit(ctx context.Context, spec CommandRequest) (agentrun.CommandReceipt, error) {
