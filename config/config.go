@@ -39,6 +39,7 @@ type Config struct {
 	SubAgents                []SubAgentConfig             `toml:"sub_agents"`
 	CustomAgents             []CustomAgentConfig          `toml:"custom_agents"`
 	DefaultImageAgentID      string                       `toml:"default_image_agent_id"`
+	ImageAnalysis            ImageAnalysisSettings        `toml:"image_analysis"`
 	WebAccess                WebAccessConfig              `toml:"web_access"`
 	Labs                     ResolvedLabs                 `toml:"labs"`
 	SkillsDir                string                       `toml:"skills_dir"`
@@ -137,6 +138,7 @@ func configFromLayered(novaDir, workspace string, layered LayeredSettings) *Conf
 		SubAgents:                   s.SubAgents,
 		CustomAgents:                s.CustomAgents,
 		DefaultImageAgentID:         settingsOptionalString(s.DefaultImageAgentID),
+		ImageAnalysis:               s.ImageAnalysis,
 		WebAccess:                   ResolveWebAccessSettings(s.WebAccess),
 		Labs:                        ResolveLabs(s.Labs),
 		SkillsDir:                   s.SkillsDir,
@@ -281,6 +283,7 @@ func settingsFromConfig(cfg *Config) Settings {
 		SubAgents:                cfg.SubAgents,
 		CustomAgents:             cfg.CustomAgents,
 		DefaultImageAgentID:      stringPtr(cfg.DefaultImageAgentID),
+		ImageAnalysis:            cfg.ImageAnalysis,
 		WebAccess:                settingsFromWebAccessConfig(cfg.WebAccess),
 		Labs: LabSettings{
 			DeveloperMode: boolPtr(cfg.Labs.DeveloperMode),

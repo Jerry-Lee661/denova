@@ -8,6 +8,7 @@ require (
 	github.com/PuerkitoBio/goquery v1.12.0
 	github.com/alfredxw/denova/agent v0.0.0
 	github.com/anmitsu/go-shlex v0.0.0-20200514113438-38f4b401e2be
+	github.com/bmaupin/go-epub v1.1.0
 	github.com/cavaliergopher/grab/v3 v3.0.1
 	github.com/charmbracelet/x/xpty v0.1.3
 	github.com/cloudwego/hertz v0.10.5
@@ -19,10 +20,12 @@ require (
 	github.com/go-rod/rod v0.116.2
 	github.com/go-rod/stealth v0.4.9
 	github.com/gofrs/flock v0.13.0
+	github.com/gomutex/godocx v0.1.5
 	github.com/google/uuid v1.6.0
 	github.com/hertz-contrib/gzip v0.0.4
 	github.com/hertz-contrib/websocket v0.2.0
 	github.com/invopop/jsonschema v0.14.0
+	github.com/klippa-app/go-pdfium v1.19.8
 	github.com/lithammer/fuzzysearch v1.1.8
 	github.com/ncruces/zenity v0.10.14
 	github.com/pelletier/go-toml/v2 v2.4.0
@@ -48,7 +51,6 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.61.0 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/bmatcuk/doublestar/v4 v4.10.0 // indirect
-	github.com/bmaupin/go-epub v1.1.0 // indirect
 	github.com/buger/jsonparser v1.2.0 // indirect
 	github.com/bytedance/gopkg v0.1.4 // indirect
 	github.com/bytedance/sonic v1.15.2 // indirect
@@ -75,21 +77,21 @@ require (
 	github.com/gofrs/uuid v3.1.0+incompatible // indirect
 	github.com/gogs/chardet v0.0.0-20211120154057-b7413eaefb8f // indirect
 	github.com/golang/groupcache v0.0.0-20241129210726-2c02b8208cf8 // indirect
-	github.com/gomutex/godocx v0.1.5 // indirect
-	github.com/google/pprof v0.0.0-20230207041349-798e818bf904 // indirect
+	github.com/google/pprof v0.0.0-20260402051712-545e8a4df936 // indirect
 	github.com/itlightning/dateparse v0.2.1 // indirect
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
+	github.com/jolestar/go-commons-pool/v2 v2.1.2 // indirect
 	github.com/josephspurrier/goversioninfo v1.4.1 // indirect
 	github.com/kaptinlin/jsonrepair v0.4.8 // indirect
 	github.com/kevinburke/ssh_config v1.6.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.3.0 // indirect
-	github.com/onsi/gomega v1.41.0 // indirect
 	github.com/openai/openai-go/v3 v3.48.0 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
 	github.com/pjbgf/sha1cd v0.6.0 // indirect
 	github.com/randall77/makefat v0.0.0-20210315173500-7ddd0e42c844 // indirect
 	github.com/skeema/knownhosts v1.3.2 // indirect
 	github.com/standard-webhooks/standard-webhooks/libraries v0.0.1 // indirect
+	github.com/tetratelabs/wazero v1.12.0 // indirect
 	github.com/tidwall/gjson v1.19.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
@@ -105,6 +107,6 @@ require (
 	go.yaml.in/yaml/v4 v4.0.0-rc.2 // indirect
 	golang.org/x/arch v0.28.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
-	google.golang.org/protobuf v1.36.10 // indirect
+	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 )

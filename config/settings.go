@@ -45,6 +45,7 @@ type Settings struct {
 	SubAgents                []SubAgentConfig             `toml:"sub_agents,omitempty" json:"sub_agents,omitempty"`
 	CustomAgents             []CustomAgentConfig          `toml:"custom_agents,omitempty" json:"custom_agents,omitempty"`
 	DefaultImageAgentID      *string                      `toml:"default_image_agent_id,omitempty" json:"default_image_agent_id,omitempty"`
+	ImageAnalysis            ImageAnalysisSettings        `toml:"image_analysis,omitempty" json:"image_analysis,omitempty"`
 	WebAccess                WebAccessSettings            `toml:"web_access,omitempty" json:"web_access,omitempty"`
 	Labs                     LabSettings                  `toml:"labs,omitempty" json:"labs,omitempty"`
 
@@ -283,6 +284,7 @@ func Merge(parent, child Settings) Settings {
 		out.DefaultImageAgentID = &value
 	}
 	out.WebAccess = MergeWebAccessSettings(out.WebAccess, child.WebAccess)
+	out.ImageAnalysis = mergeImageAnalysisSettings(out.ImageAnalysis, child.ImageAnalysis)
 	out.Labs = MergeLabSettings(out.Labs, child.Labs)
 	if child.SkillsDir != "" {
 		out.SkillsDir = child.SkillsDir
