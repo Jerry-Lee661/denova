@@ -1,4 +1,4 @@
-package chm
+package container
 
 import (
 	"encoding/binary"

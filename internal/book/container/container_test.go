@@ -1,4 +1,4 @@
-package chm
+package container
 
 import (
 	"bytes"
@@ -16,12 +16,15 @@ func sampleCHM(t *testing.T) []byte {
 	return data
 }
 
-func TestExtractTopicsFollowsTableOfContents(t *testing.T) {
+func TestCHMTopicsFollowTableOfContents(t *testing.T) {
 	archive, err := Open(sampleCHM(t))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	defer archive.Close()
+	if archive.Kind() != KindCHM {
+		t.Fatalf("Kind = %v, want CHM", archive.Kind())
+	}
 	topics, err := archive.Topics()
 	if err != nil {
 		t.Fatalf("Topics: %v", err)
@@ -39,14 +42,17 @@ func TestExtractTopicsFollowsTableOfContents(t *testing.T) {
 	}
 	sitemap, ok := archive.Sitemap()
 	if !ok {
-		t.Fatalf("Sitemap missing for fixture")
+		t.Fatalf("Sitemap missing for CHM fixture")
 	}
 	if !bytes.Contains(sitemap, gbkBytes(t, fixtureTopics[0].title)) {
 		t.Fatalf("sitemap does not contain GBK title %q", fixtureTopics[0].title)
 	}
+	if _, ok := archive.TocTree(); ok {
+		t.Fatalf("TocTree should not be available for CHM archives")
+	}
 }
 
-func TestExtractTopicsRejectsNonCHMData(t *testing.T) {
+func TestOpenRejectsNonContainerData(t *testing.T) {
 	for _, data := range [][]byte{
 		nil,
 		[]byte("plain text, not a compiled help file"),

@@ -138,7 +138,7 @@ export function NovelImportDialog({ open, novaDir, onOpenChange, onImported }: N
       <input
         ref={inputRef}
         type="file"
-        accept=".txt,.md,.markdown,.chm,text/plain,text/markdown,text/x-markdown,application/vnd.ms-htmlhelp"
+        accept=".txt,.md,.markdown,.chm,.epub,text/plain,text/markdown,text/x-markdown,application/vnd.ms-htmlhelp,application/epub+zip"
         className="hidden"
         onChange={(event) => void handleFileSelected(event.target.files?.[0])}
       />

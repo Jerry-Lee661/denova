@@ -9,27 +9,21 @@ import (
 	htmltomarkdown "github.com/JohannesKaufmann/html-to-markdown"
 	"github.com/PuerkitoBio/goquery"
 
-	"denova/internal/book/chm"
+	"denova/internal/book/container"
 )
 
-// chmSitemapNode is one entry of the CHM's decoded table-of-contents tree.
-type chmSitemapNode struct {
-	Title    string
-	Path     string // normalized topic path key; empty for pure group nodes
-	Children []*chmSitemapNode
-}
-
-// extractCHMChapters converts a .chm upload into chapters that mirror the
-// CHM's own table-of-contents tree. Denova has two content levels, so the
-// tree folds as: level-1 entries become volumes, level-3 entries become
-// chapters titled "level-2 · level-3" (level-2 entries with their own page
-// keep a chapter of that page), and everything deeper is concatenated into
-// its level-3 chapter with hierarchical section headings. Topics outside the
-// sitemap are grouped by their first path segment into a volume of that name.
-// Titles come from the decoded sitemap (CHM files rarely store it in UTF-8),
-// falling back to each topic's <title>.
-func extractCHMChapters(data []byte) ([]parsedNovelChapter, error) {
-	archive, err := chm.Open(data)
+// extractContainerChapters converts a .chm or .epub upload into chapters that
+// mirror the container's own table-of-contents tree. Denova has two content
+// levels, so the tree folds as: level-1 entries become volumes, level-3
+// entries become chapters titled "level-2 · level-3" (level-2 entries with
+// their own page keep a chapter of that page), and everything deeper is
+// concatenated into its level-3 ancestor's chapter with hierarchical section
+// headings. Topics outside the table of contents are grouped by their first
+// path segment into a volume of that name. Titles come from the decoded table
+// of contents (CHM files rarely store it in UTF-8), falling back to each
+// topic's <title>.
+func extractContainerChapters(data []byte) ([]parsedNovelChapter, error) {
+	archive, err := container.Open(data)
 	if err != nil {
 		return nil, err
 	}
@@ -41,7 +35,16 @@ func extractCHMChapters(data []byte) ([]parsedNovelChapter, error) {
 	if len(topics) == 0 {
 		return nil, fmt.Errorf("文件内容为空")
 	}
-	root := parseCHMSitemapTree(archive)
+	var toc []*container.TocNode
+	var tocOK bool
+	switch archive.Kind() {
+	case container.KindCHM:
+		toc = parseCHMSitemapTree(archive)
+		tocOK = true
+	case container.KindEPUB:
+		toc, tocOK = archive.TocTree()
+		normalizeTocPaths(toc)
+	}
 
 	converter := htmltomarkdown.NewConverter("", true, nil)
 	bodies := make(map[string]string, len(topics))
@@ -49,7 +52,7 @@ func extractCHMChapters(data []byte) ([]parsedNovelChapter, error) {
 	for _, topic := range topics {
 		decoded, decodeErr := decodeNovelTextBytes(topic.HTML)
 		if decodeErr != nil {
-			return nil, fmt.Errorf("只支持 UTF-8、UTF-16 或 GB18030 编码的 CHM 主题 %s", topic.Path)
+			return nil, fmt.Errorf("只支持 UTF-8、UTF-16 或 GB18030 编码的容器主题 %s", topic.Path)
 		}
 		htmlTitle, body := convertTopicToMarkdown(converter, decoded)
 		key := chmPathKey(topic.Path)
@@ -58,13 +61,13 @@ func extractCHMChapters(data []byte) ([]parsedNovelChapter, error) {
 			fallbackTitles[key] = htmlTitle
 		}
 	}
-	log.Printf("[novel-import] chm extracted topics=%d sitemap_toplevel=%d", len(topics), len(root.Children))
+	log.Printf("[novel-import] container extracted kind=%v topics=%d toc=%v", archive.Kind(), len(topics), tocOK)
 
 	used := map[string]bool{}
 	inTree := map[string]bool{}
 	var chapters []parsedNovelChapter
 
-	ownBody := func(node *chmSitemapNode) string {
+	ownBody := func(node *container.TocNode) string {
 		if node.Path == "" || used[node.Path] {
 			return ""
 		}
@@ -78,8 +81,8 @@ func extractCHMChapters(data []byte) ([]parsedNovelChapter, error) {
 
 	// renderChildren appends every descendant page, headed by its title at a
 	// heading depth that follows the tree depth (## for direct children).
-	var renderChildren func(children []*chmSitemapNode, depth int, parts *[]string)
-	renderChildren = func(children []*chmSitemapNode, depth int, parts *[]string) {
+	var renderChildren func(children []*container.TocNode, depth int, parts *[]string)
+	renderChildren = func(children []*container.TocNode, depth int, parts *[]string) {
 		for _, child := range children {
 			if child.Path != "" {
 				inTree[child.Path] = true
@@ -98,7 +101,7 @@ func extractCHMChapters(data []byte) ([]parsedNovelChapter, error) {
 		}
 	}
 
-	appendChapter := func(node *chmSitemapNode, volume, titleOverride string) {
+	appendChapter := func(node *container.TocNode, volume, titleOverride string) {
 		if node.Path != "" {
 			inTree[node.Path] = true
 		}
@@ -118,7 +121,7 @@ func extractCHMChapters(data []byte) ([]parsedNovelChapter, error) {
 		})
 	}
 
-	for _, top := range root.Children {
+	for _, top := range toc {
 		if len(top.Children) == 0 {
 			appendChapter(top, "", "")
 			continue
@@ -150,8 +153,20 @@ func extractCHMChapters(data []byte) ([]parsedNovelChapter, error) {
 		}
 	}
 
-	// Topics the sitemap never mentions keep their spine order, grouped by
-	// their first path segment so unlisted folders still become volumes.
+	// Topics the table of contents never mentions keep their spine order.
+	// CHM folders carry content groupings, so unlisted topics are grouped by
+	// their first path segment; EPUB folders are layout artifacts and stay
+	// unfiled.
+	orphanVolume := func(topicPath string) string {
+		if archive.Kind() != container.KindCHM {
+			return ""
+		}
+		normalized := strings.ReplaceAll(topicPath, "\\", "/")
+		if slash := strings.Index(normalized, "/"); slash > 0 {
+			return normalized[:slash]
+		}
+		return ""
+	}
 	for _, topic := range topics {
 		key := chmPathKey(topic.Path)
 		if used[key] || inTree[key] {
@@ -162,14 +177,9 @@ func extractCHMChapters(data []byte) ([]parsedNovelChapter, error) {
 			continue
 		}
 		used[key] = true
-		normalized := strings.ReplaceAll(topic.Path, "\\", "/")
-		volume := ""
-		if slash := strings.Index(normalized, "/"); slash > 0 {
-			volume = normalized[:slash]
-		}
 		title := firstNonEmpty(fallbackTitles[key], chmPathTitle(topic.Path))
 		chapters = append(chapters, parsedNovelChapter{
-			NovelImportChapter: NovelImportChapter{Title: title, Volume: volume},
+			NovelImportChapter: NovelImportChapter{Title: title, Volume: orphanVolume(topic.Path)},
 			Content:            body + "\n",
 		})
 	}
@@ -212,36 +222,35 @@ func convertTopicToMarkdown(converter *htmltomarkdown.Converter, doc string) (st
 	return title, strings.TrimSpace(markdown)
 }
 
-// parseCHMSitemapTree walks the container's .hhc table of contents into a
+// parseCHMSitemapTree walks the CHM container's .hhc table of contents into a
 // decoded node tree. Classic .hhc files close <li> implicitly, so a nested
 // list can be a sibling <ul> grouping under the nearest preceding item; the
 // also-common <li><object/><ul/></li> style nests it inside the item. Both
 // shapes are handled. A missing or malformed sitemap yields an empty root.
-func parseCHMSitemapTree(archive *chm.Archive) *chmSitemapNode {
-	root := &chmSitemapNode{}
+func parseCHMSitemapTree(archive *container.Archive) []*container.TocNode {
 	raw, ok := archive.Sitemap()
 	if !ok {
-		return root
+		return nil
 	}
 	decoded, err := decodeNovelTextBytes(raw)
 	if err != nil {
 		log.Printf("[novel-import] chm sitemap decode failed err=%v", err)
-		return root
+		return nil
 	}
 	parsed, err := goquery.NewDocumentFromReader(strings.NewReader(decoded))
 	if err != nil {
-		return root
+		return nil
 	}
 
-	var walkList func(sel *goquery.Selection) []*chmSitemapNode
-	walkList = func(sel *goquery.Selection) []*chmSitemapNode {
-		var out []*chmSitemapNode
-		var last *chmSitemapNode
+	var walkList func(sel *goquery.Selection) []*container.TocNode
+	walkList = func(sel *goquery.Selection) []*container.TocNode {
+		var out []*container.TocNode
+		var last *container.TocNode
 		sel.Children().Each(func(_ int, n *goquery.Selection) {
 			switch goquery.NodeName(n) {
 			case "li":
 				title, local := chmSitemapObject(n)
-				node := &chmSitemapNode{Title: title}
+				node := &container.TocNode{Title: title}
 				if local != "" {
 					node.Path = chmPathKey(local)
 				}
@@ -263,10 +272,22 @@ func parseCHMSitemapTree(archive *chm.Archive) *chmSitemapNode {
 		})
 		return out
 	}
+	var root []*container.TocNode
 	parsed.Find("body").Each(func(_ int, body *goquery.Selection) {
-		root.Children = append(root.Children, walkList(body)...)
+		root = append(root, walkList(body)...)
 	})
 	return root
+}
+
+// normalizeTocPaths folds outline paths into the same normalized space the
+// topic lookup keys use (folio keeps the original entry casing).
+func normalizeTocPaths(nodes []*container.TocNode) {
+	for _, node := range nodes {
+		if node.Path != "" {
+			node.Path = chmPathKey(node.Path)
+		}
+		normalizeTocPaths(node.Children)
+	}
 }
 
 // chmSitemapObject reads the Name and Local params of the sitemap object of

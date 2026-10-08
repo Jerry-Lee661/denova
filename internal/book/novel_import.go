@@ -22,9 +22,10 @@ const (
 	NovelImportSplitStrategyLocal   = "local_regex"
 	NovelImportSplitStrategyAgent   = "tool_agent_regex"
 	NovelImportSplitStrategyCustom  = "custom_regex"
-	// NovelImportSplitStrategyCHMTopic splits a CHM by its own table of
-	// contents: one chapter per topic, grouped by the sitemap nesting.
-	NovelImportSplitStrategyCHMTopic = "chm_toc"
+	// NovelImportSplitStrategyTOCTree splits a CHM or EPUB container by its
+	// own table of contents: volumes from top-level entries, chapters from
+	// their nested entries, deeper topics merged into their chapter.
+	NovelImportSplitStrategyTOCTree = "toc_tree"
 
 	NovelImportSingleChapterWarning       = "novel_import_single_chapter"
 	NovelImportAgentFallbackWarning       = "novel_import_agent_fallback"
@@ -187,8 +188,8 @@ func ImportNovelToWorkspace(workspace, filename string, data []byte, opts ...Nov
 func parseNovelImport(filename string, data []byte, opts NovelImportOptions) (parsedNovel, error) {
 	name := strings.TrimSpace(filename)
 	ext := strings.ToLower(filepath.Ext(name))
-	if ext != ".txt" && ext != ".md" && ext != ".markdown" && ext != ".chm" {
-		return parsedNovel{}, fmt.Errorf("只支持 txt/md/chm 文件")
+	if ext != ".txt" && ext != ".md" && ext != ".markdown" && ext != ".chm" && ext != ".epub" {
+		return parsedNovel{}, fmt.Errorf("只支持 txt/md/chm/epub 文件")
 	}
 	if len(data) == 0 {
 		return parsedNovel{}, fmt.Errorf("文件为空")
@@ -197,16 +198,16 @@ func parseNovelImport(filename string, data []byte, opts NovelImportOptions) (pa
 	var chapters []parsedNovelChapter
 	var text, splitStrategy, splitRegex string
 	var warnings []string
-	if ext == ".chm" && strings.TrimSpace(opts.SplitRegex) == "" {
-		// A CHM carries its own structure: split by its table of contents, one
-		// chapter per topic, instead of prose title patterns.
+	if (ext == ".chm" || ext == ".epub") && strings.TrimSpace(opts.SplitRegex) == "" {
+		// A CHM or EPUB carries its own structure: split by its table of
+		// contents, instead of prose title patterns.
 		var err error
-		chapters, err = extractCHMChapters(data)
+		chapters, err = extractContainerChapters(data)
 		if err != nil {
 			slog.ErrorContext(context.Background(), fmt.Sprintf("[novel-import] parse failed filename=%q err=%v", name, err))
 			return parsedNovel{}, err
 		}
-		splitStrategy = NovelImportSplitStrategyCHMTopic
+		splitStrategy = NovelImportSplitStrategyTOCTree
 		for _, chapter := range chapters {
 			text += chapter.Content
 			if utf8.RuneCountInString(text) >= 4000 {
@@ -215,8 +216,8 @@ func parseNovelImport(filename string, data []byte, opts NovelImportOptions) (pa
 		}
 		text = normalizeNovelText(text)
 	} else {
-		if ext == ".chm" {
-			topicChapters, err := extractCHMChapters(data)
+		if ext == ".chm" || ext == ".epub" {
+			topicChapters, err := extractContainerChapters(data)
 			if err != nil {
 				slog.ErrorContext(context.Background(), fmt.Sprintf("[novel-import] parse failed filename=%q err=%v", name, err))
 				return parsedNovel{}, err
@@ -691,7 +692,7 @@ func novelImportLineTitle(line string, allowMarkdownHeading bool) (novelImportTi
 }
 
 func novelImportAllowMarkdownHeadings(sourceExt string) bool {
-	return sourceExt == ".md" || sourceExt == ".markdown" || sourceExt == ".chm"
+	return sourceExt == ".md" || sourceExt == ".markdown" || sourceExt == ".chm" || sourceExt == ".epub"
 }
 
 func classifyNovelImportTitle(title string) novelImportTitle {
