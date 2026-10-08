@@ -425,6 +425,7 @@ export function HomeView({ workspace, novaDir, books, bookSortMode, onSwitch, on
       <NovelImportDialog
         open={showNovelImport}
         novaDir={novaDir}
+        books={books}
         onOpenChange={setShowNovelImport}
         onImported={async (result) => {
           await Promise.resolve(onSwitch(result.workspace))

@@ -94,7 +94,7 @@ func TestImportNovelToWorkspaceWritesChapters(t *testing.T) {
 	}
 	data := []byte("第一章 开始\n\n内容一\n\n第二章 继续\n\n内容二")
 
-	preview, paths, err := ImportNovelToWorkspace(dir, "测试.txt", data)
+	preview, paths, _, err := ImportNovelToWorkspace(dir, "测试.txt", data)
 	if err != nil {
 		t.Fatalf("ImportNovelToWorkspace failed: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestImportNovelToWorkspaceFormatsTxtLineBreaksForMarkdown(t *testing.T) {
 	}
 	data := []byte("第一章 起飞\n第一行没有空行\n第二行也没有空行\n第二章 巡航\n第三行")
 
-	_, paths, err := ImportNovelToWorkspace(dir, "蓝天.txt", data)
+	_, paths, _, err := ImportNovelToWorkspace(dir, "蓝天.txt", data)
 	if err != nil {
 		t.Fatalf("ImportNovelToWorkspace failed: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestImportNovelToWorkspaceAvoidsIndentedCodeBlocksForTxt(t *testing.T) {
 	}
 	data := []byte("第一章 起飞\n    四空格缩进不会变代码块\n\tTab 缩进也不会变代码块\n第二章 巡航\n正文")
 
-	_, paths, err := ImportNovelToWorkspace(dir, "蓝天.txt", data)
+	_, paths, _, err := ImportNovelToWorkspace(dir, "蓝天.txt", data)
 	if err != nil {
 		t.Fatalf("ImportNovelToWorkspace failed: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestImportNovelToWorkspaceWritesChaptersIntoVolumes(t *testing.T) {
 第三章 穿云
 内容三`)
 
-	preview, paths, err := ImportNovelToWorkspace(dir, "蓝天.txt", data)
+	preview, paths, _, err := ImportNovelToWorkspace(dir, "蓝天.txt", data)
 	if err != nil {
 		t.Fatalf("ImportNovelToWorkspace failed: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestImportNovelToWorkspaceUsesChineseChapterFilenameStyle(t *testing.T) {
 	}
 	data := []byte("第一章 缘起\n内容一\n\n第二章 风起\n内容二")
 
-	preview, paths, err := ImportNovelToWorkspace(dir, "中文.txt", data)
+	preview, paths, _, err := ImportNovelToWorkspace(dir, "中文.txt", data)
 	if err != nil {
 		t.Fatalf("ImportNovelToWorkspace failed: %v", err)
 	}
@@ -246,7 +246,7 @@ func TestImportNovelToWorkspaceUsesEnglishChapterFilenameStyle(t *testing.T) {
 	}
 	data := []byte("Chapter 1 Origin\nThe first line.\n\nChapter 2 Flight\nThe second line.")
 
-	preview, paths, err := ImportNovelToWorkspace(dir, "english.txt", data)
+	preview, paths, _, err := ImportNovelToWorkspace(dir, "english.txt", data)
 	if err != nil {
 		t.Fatalf("ImportNovelToWorkspace failed: %v", err)
 	}
@@ -421,7 +421,7 @@ func TestImportNovelToWorkspaceUsesConfirmedRegex(t *testing.T) {
 		t.Fatalf("InitWorkspace failed: %v", err)
 	}
 	data := []byte(":: 上\n内容一\n\n:: 下\n内容二")
-	preview, paths, err := ImportNovelToWorkspace(dir, "确认.txt", data, NovelImportOptions{
+	preview, paths, _, err := ImportNovelToWorkspace(dir, "确认.txt", data, NovelImportOptions{
 		SplitRegex:  `^::\s*(.+)$`,
 		SampleChars: 1000000,
 	})
@@ -470,8 +470,8 @@ func TestPreviewNovelImportRejectsUnsupportedFiles(t *testing.T) {
 }
 
 func TestPreviewNovelImportSkipsPlaceholderChapters(t *testing.T) {
-	long := strings.Repeat("雪落在窗台上，映着微弱的灯光。", 14)
-	content := "第一章 长夜\n" + long + "\n第二章 短语\n只有一行。\n第三章 微光\n" + strings.Repeat("灯影摇曳，夜色渐深。", 22) + "\n"
+	long := strings.Repeat("雪落在窗台上，映着微弱的灯光。", 34)
+	content := "第一章 长夜\n" + long + "\n第二章 短语\n只有一行。\n第三章 微光\n" + strings.Repeat("灯影摇曳，夜色渐深。", 52) + "\n"
 	preview, err := PreviewNovelImport("样本.txt", []byte(content), NovelImportOptions{SkipPlaceholderChapters: true})
 	if err != nil {
 		t.Fatalf("PreviewNovelImport: %v", err)
@@ -506,5 +506,31 @@ func TestPreviewNovelImportKeepsAllTinyChaptersWhenNothingSurvives(t *testing.T)
 		if strings.HasPrefix(warning, NovelImportPlaceholderSkippedWarningPrefix) {
 			t.Fatalf("unexpected placeholder warning: %q", warning)
 		}
+	}
+}
+
+func TestPreviewNovelImportSkipsStructuralTitles(t *testing.T) {
+	preface := strings.Repeat("出版说明的内容，说明本书的整理与翻译过程。", 15)
+	prologue := strings.Repeat("风起于青萍之末。", 40)
+	real := strings.Repeat("他推开门，走进了大雪纷飞的夜。", 40)
+	content := "前言\n" + preface + "\n序章 风起\n" + prologue + "\n第一章 入城\n" + real + "\n"
+	preview, err := PreviewNovelImport("样本.txt", []byte(content), NovelImportOptions{SkipPlaceholderChapters: true})
+	if err != nil {
+		t.Fatalf("PreviewNovelImport: %v", err)
+	}
+	if preview.ChapterCount != 1 {
+		t.Fatalf("ChapterCount = %d, want 1", preview.ChapterCount)
+	}
+	if preview.Chapters[0].Title != "第一章 入城" {
+		t.Fatalf("chapter title = %q, want the formal chapter", preview.Chapters[0].Title)
+	}
+	skipped := false
+	for _, warning := range preview.Warnings {
+		if warning == NovelImportPlaceholderSkippedWarningPrefix+"2" {
+			skipped = true
+		}
+	}
+	if !skipped {
+		t.Fatalf("warnings = %v, want 2 skipped", preview.Warnings)
 	}
 }

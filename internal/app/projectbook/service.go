@@ -80,6 +80,16 @@ func (service *Service) Tree(ctx context.Context, projectID string) (string, []*
 	return runtime.layout.ContentRoot, tree, err
 }
 
+// Workspace returns the content root of a book project, for callers that
+// write into the workspace directly.
+func (service *Service) Workspace(projectID string) (string, error) {
+	runtime, err := service.resolve(projectID)
+	if err != nil {
+		return "", err
+	}
+	return runtime.layout.ContentRoot, nil
+}
+
 func (service *Service) Summary(ctx context.Context, projectID string) (string, book.WorkspaceSummary, error) {
 	runtime, err := service.resolve(projectID)
 	if err != nil {

@@ -4,12 +4,15 @@ import { useTranslation } from 'react-i18next'
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Textarea } from '@/components/ui/textarea'
+import type { BookRecord } from '@/lib/api-client/types'
 import { importNovel, previewNovelImportStream, type NovelImportPreview, type NovelImportProgress, type NovelImportResult, type SSEEvent } from '@/lib/api'
 
 interface NovelImportDialogProps {
   open: boolean
   novaDir: string
+  books?: BookRecord[]
   onOpenChange: (open: boolean) => void
   onImported: (result: NovelImportResult) => void
 }
@@ -20,11 +23,13 @@ const defaultSampleChars = 20000
 const minSampleChars = 2000
 const maxSampleChars = 100000
 
-export function NovelImportDialog({ open, novaDir, onOpenChange, onImported }: NovelImportDialogProps) {
+export function NovelImportDialog({ open, novaDir, books, onOpenChange, onImported }: NovelImportDialogProps) {
   const { t } = useTranslation()
   const inputRef = useRef<HTMLInputElement | null>(null)
   const [file, setFile] = useState<File | null>(null)
   const [preview, setPreview] = useState<NovelImportPreview | null>(null)
+  const [targetMode, setTargetMode] = useState<'new' | 'existing'>('new')
+  const [targetProjectId, setTargetProjectId] = useState('')
   const [bookTitle, setBookTitle] = useState('')
   const [author, setAuthor] = useState('')
   const [description, setDescription] = useState('')
@@ -39,6 +44,8 @@ export function NovelImportDialog({ open, novaDir, onOpenChange, onImported }: N
   const reset = () => {
     setFile(null)
     setPreview(null)
+    setTargetMode('new')
+    setTargetProjectId('')
     setBookTitle('')
     setAuthor('')
     setDescription('')
@@ -112,16 +119,22 @@ export function NovelImportDialog({ open, novaDir, onOpenChange, onImported }: N
       setError(t('novelImport.chooseFileFirst'))
       return
     }
+    const appending = targetMode === 'existing'
+    if (appending && !targetProjectId) {
+      setError(t('novelImport.chooseTargetBook'))
+      return
+    }
     setImporting(true)
     setError('')
     try {
       const result = await importNovel(file, {
-        bookTitle: bookTitle.trim() || preview.title,
-        author: author.trim() || undefined,
-        description: description.trim() || undefined,
+        bookTitle: appending ? undefined : bookTitle.trim() || preview.title,
+        author: appending ? undefined : author.trim() || undefined,
+        description: appending ? undefined : description.trim() || undefined,
         sampleChars: preview.sample_chars,
         splitRegex: preview.split_regex,
         splitStrategy: preview.split_strategy,
+        targetProjectId: appending ? targetProjectId : undefined,
       })
       onImported(result)
       reset()
@@ -170,6 +183,37 @@ export function NovelImportDialog({ open, novaDir, onOpenChange, onImported }: N
               <div className="min-w-0 flex-1 truncate text-[var(--nova-text-faint)]">{file ? file.name : t('novelImport.noFile')}</div>
               {previewing && <span className="shrink-0 text-[var(--nova-text-muted)]">{previewProgress || t('novelImport.parsing')}</span>}
             </div>
+
+            {books && books.length > 0 && (
+              <div className="flex items-center gap-2">
+                <span className="shrink-0 text-[11px] text-[var(--nova-text-faint)]">{t('novelImport.importTarget')}</span>
+                <Select
+                  value={targetMode === 'existing' ? 'existing:' + targetProjectId : 'new'}
+                  onValueChange={(value) => {
+                    if (value === 'new') {
+                      setTargetMode('new')
+                      setTargetProjectId('')
+                      return
+                    }
+                    setTargetMode('existing')
+                    setTargetProjectId(value.slice('existing:'.length))
+                  }}
+                  disabled={importing}
+                >
+                  <SelectTrigger className="h-7 min-w-0 flex-1 text-[11px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent className="max-h-64">
+                    <SelectItem value="new">{t('novelImport.targetNew')}</SelectItem>
+                    {books.map((book) => (
+                      <SelectItem key={book.project_id} value={'existing:' + book.project_id}>
+                        {book.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+            )}
 
             {preview && (
               <div className="space-y-3 rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface)] px-3 py-3">
@@ -253,7 +297,7 @@ export function NovelImportDialog({ open, novaDir, onOpenChange, onImported }: N
               </div>
             )}
 
-            {preview && (
+            {preview && targetMode === 'new' && (
               <div className="space-y-2">
                 <Input
                   value={bookTitle}
@@ -280,6 +324,10 @@ export function NovelImportDialog({ open, novaDir, onOpenChange, onImported }: N
                 />
                 <div className="truncate text-[11px] text-[var(--nova-text-faint)]">{t('novelImport.createIn', { dir: novaDir || t('importCard.novaDir') })}</div>
               </div>
+            )}
+
+            {preview && targetMode === 'existing' && (
+              <div className="truncate text-[11px] text-[var(--nova-text-faint)]">{t('novelImport.appendHint')}</div>
             )}
 
             {error && (

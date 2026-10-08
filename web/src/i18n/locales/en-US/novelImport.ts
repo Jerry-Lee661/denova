@@ -1,4 +1,8 @@
 const novelImport = {
+  'novelImport.appendHint': 'Chapters are appended to the selected book: numbering continues after existing chapters and matching volumes are merged.',
+  'novelImport.chooseTargetBook': 'Choose a target book',
+  'novelImport.targetNew': 'Create as a new book',
+  'novelImport.importTarget': 'Import into',
   'novelImport.title': 'Import Existing Novel',
   'novelImport.description': 'Import a txt/md/chm/epub novel, parse chapters automatically, and create it as a new book.',
   'novelImport.chooseFile': 'Choose File',

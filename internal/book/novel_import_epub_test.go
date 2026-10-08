@@ -57,7 +57,7 @@ func TestPreviewNovelImportEPUBMirrorsNavTree(t *testing.T) {
 
 func TestImportNovelToWorkspaceWritesEPUBChapters(t *testing.T) {
 	workspace := t.TempDir()
-	preview, paths, err := ImportNovelToWorkspace(workspace, "初雪.epub", sampleEPUBBytes(t))
+	preview, paths, _, err := ImportNovelToWorkspace(workspace, "初雪.epub", sampleEPUBBytes(t))
 	if err != nil {
 		t.Fatalf("ImportNovelToWorkspace: %v", err)
 	}

@@ -37,10 +37,15 @@ const (
 	// pages, production notes) whose entire content is shorter than this many
 	// runes, so real chapters are not offset by structural filler. A book
 	// whose chapters are all below the floor keeps every chapter.
-	novelImportMinChapterChars = 200
+	novelImportMinChapterChars = 500
 
 	NovelImportPlaceholderSkippedWarningPrefix = "novel_import_placeholder_skipped:"
 )
+
+// novelImportStructuralTitlePattern matches front- and back-matter titles
+// (prefaces, copyright pages, production notes) that are structural
+// regardless of length.
+var novelImportStructuralTitlePattern = regexp.MustCompile(`(?i)^(?:前言|序章|序言|自序|译序|原序|序|引子|楔子|后记|尾声|结语|结束语|制作说明|版权信息|版权页|出版说明|出版信息|目录|更新日志|修订说明|鸣谢|致谢|参考资料|参考文献|序论|总序|(?:prologue|epilogue|preface|foreword|afterword|copyright|acknowledg\w*|table of contents))\s*[：:·—\-–]?`)
 
 const (
 	NovelImportLanguageChinese = "zh"
@@ -145,13 +150,14 @@ type novelImportTitle struct {
 
 // NovelImportResult describes a completed file import.
 type NovelImportResult struct {
-	Workspace    string    `json:"workspace"`
-	BookMeta     *BookMeta `json:"book_meta,omitempty"`
-	Title        string    `json:"title"`
-	ChapterCount int       `json:"chapter_count"`
-	TotalChars   int       `json:"total_chars"`
-	ChapterPaths []string  `json:"chapter_paths"`
-	Message      string    `json:"message"`
+	Workspace       string    `json:"workspace"`
+	BookMeta        *BookMeta `json:"book_meta,omitempty"`
+	Title           string    `json:"title"`
+	ChapterCount    int       `json:"chapter_count"`
+	TotalChars      int       `json:"total_chars"`
+	ChapterPaths    []string  `json:"chapter_paths"`
+	SkippedExisting int       `json:"skipped_existing,omitempty"`
+	Message         string    `json:"message"`
 }
 
 // PreviewNovelImport parses a txt/md upload without writing workspace files.
@@ -163,39 +169,133 @@ func PreviewNovelImport(filename string, data []byte, opts ...NovelImportOptions
 	return parsed.Preview, nil
 }
 
-// ImportNovelToWorkspace writes parsed txt/md chapters into an initialized workspace.
-func ImportNovelToWorkspace(workspace, filename string, data []byte, opts ...NovelImportOptions) (NovelImportPreview, []string, error) {
+// workspaceChapterState is what an existing workspace contributes to an
+// import: the highest chapter and volume numbers already in use, the volume
+// directories by display name, and every existing chapter file path.
+type workspaceChapterState struct {
+	maxChapterIndex int
+	maxVolumeIndex  int
+	volumeDirs      map[string]string // display name -> slash dir path
+	existingFiles   map[string]bool   // slash chapter paths already on disk
+}
+
+func scanWorkspaceChapters(workspace string) workspaceChapterState {
+	state := workspaceChapterState{
+		volumeDirs:    map[string]string{},
+		existingFiles: map[string]bool{},
+	}
+	root := filepath.Join(workspace, "chapters")
+	var walk func(dir, relDir string)
+	walk = func(dir, relDir string) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			if strings.HasPrefix(name, ".") {
+				continue
+			}
+			rel := relDir
+			if rel != "" {
+				rel += "/"
+			}
+			rel += name
+			if entry.IsDir() {
+				if matches := hiddenVolumePrefixPattern.FindStringSubmatch(name); matches != nil {
+					index, _ := strconv.Atoi(matches[1])
+					if index > state.maxVolumeIndex {
+						state.maxVolumeIndex = index
+					}
+					state.volumeDirs[visibleNameBase(name)] = rel
+				}
+				walk(filepath.Join(dir, name), rel)
+				continue
+			}
+			state.existingFiles[rel] = true
+			if matches := hiddenChapterPrefixPattern.FindStringSubmatch(name); matches != nil {
+				index, _ := strconv.Atoi(matches[1])
+				if index > state.maxChapterIndex {
+					state.maxChapterIndex = index
+				}
+			}
+		}
+	}
+	walk(root, "chapters")
+	return state
+}
+
+// ImportNovelToWorkspace writes parsed chapters into the workspace. When the
+// workspace already holds chapters the import continues after them: chapter
+// numbering resumes past the highest existing chNNNNN, chapters whose volume
+// matches an existing volume directory join that directory, new volumes are
+// numbered after the existing ones, and chapter files that already exist are
+// skipped (counted in the returned value) instead of being overwritten.
+func ImportNovelToWorkspace(workspace, filename string, data []byte, opts ...NovelImportOptions) (NovelImportPreview, []string, int, error) {
 	parsed, err := parseNovelImport(filename, data, mergeNovelImportOptions(opts...))
 	if err != nil {
-		return NovelImportPreview{}, nil, err
+		return NovelImportPreview{}, nil, 0, err
 	}
+	state := scanWorkspaceChapters(workspace)
 	chapterDir := filepath.Join(workspace, "chapters")
 	if err := os.MkdirAll(chapterDir, 0o755); err != nil {
-		return NovelImportPreview{}, nil, fmt.Errorf("创建章节目录失败: %w", err)
+		return NovelImportPreview{}, nil, 0, fmt.Errorf("创建章节目录失败: %w", err)
 	}
-	paths := make([]string, 0, len(parsed.Chapters))
 	volumePaths := assignVolumePaths(parsed.Chapters)
-	for _, chapter := range parsed.Chapters {
+	if state.maxVolumeIndex > 0 || len(state.volumeDirs) > 0 {
+		// Remap volumes onto the workspace: matching display names join their
+		// existing directory, new names number after the highest one in use.
+		next := state.maxVolumeIndex
+		remapped := map[string]string{}
+		for _, chapter := range parsed.Chapters {
+			if chapter.Volume == "" {
+				continue
+			}
+			if dir, ok := state.volumeDirs[chapter.Volume]; ok {
+				remapped[chapter.Volume] = dir
+				continue
+			}
+			if _, allocated := remapped[chapter.Volume]; !allocated {
+				next++
+				remapped[chapter.Volume] = prefixedVolumePath(next, chapter.Volume)
+			}
+		}
+		volumePaths = remapped
+	}
+
+	paths := make([]string, 0, len(parsed.Chapters))
+	written := make([]string, len(parsed.Chapters))
+	skippedExisting := 0
+	for i, chapter := range parsed.Chapters {
+		index := chapter.Index
+		if state.maxChapterIndex > 0 {
+			index = state.maxChapterIndex + i + 1
+		}
 		rel := chapter.Path
-		if rel == "" {
-			rel = chapterPath(chapter.Index, chapter.Title, chapter.Volume, volumePaths, parsed.Preview.Language)
+		if rel == "" || state.maxChapterIndex > 0 || state.maxVolumeIndex > 0 {
+			rel = chapterPath(index, chapter.Title, chapter.Volume, volumePaths, parsed.Preview.Language)
+		}
+		if state.existingFiles[rel] {
+			skippedExisting++
+			continue
 		}
 		dst := filepath.Join(workspace, filepath.FromSlash(rel))
 		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return NovelImportPreview{}, nil, fmt.Errorf("创建章节子目录失败: %w", err)
+			return NovelImportPreview{}, nil, 0, fmt.Errorf("创建章节子目录失败: %w", err)
 		}
 		if err := os.WriteFile(dst, []byte(chapter.Content), 0o644); err != nil {
-			return NovelImportPreview{}, nil, fmt.Errorf("写入章节失败 %s: %w", rel, err)
+			return NovelImportPreview{}, nil, 0, fmt.Errorf("写入章节失败 %s: %w", rel, err)
 		}
+		written[i] = rel
 		paths = append(paths, rel)
 	}
 	preview := parsed.Preview
 	for i := range preview.Chapters {
-		if i < len(paths) {
-			preview.Chapters[i].Path = paths[i]
+		if i < len(written) && written[i] != "" {
+			preview.Chapters[i].Path = written[i]
 		}
 	}
-	return preview, paths, nil
+	return preview, paths, skippedExisting, nil
 }
 
 func parseNovelImport(filename string, data []byte, opts NovelImportOptions) (parsedNovel, error) {
@@ -257,14 +357,17 @@ func parseNovelImport(filename string, data []byte, opts NovelImportOptions) (pa
 			return parsedNovel{}, err
 		}
 	}
-	// Drop placeholder chapters (volume title pages, production notes) so
-	// real chapters are not offset by structural filler. A book whose
-	// chapters are all tiny keeps everything instead of coming out empty.
+	// Drop placeholder chapters (volume title pages, production notes,
+	// prefaces and other non-formal entries) so real chapters are not offset
+	// by structural filler. A book whose chapters are all tiny keeps
+	// everything instead of coming out empty.
 	if opts.SkipPlaceholderChapters && len(chapters) > 1 {
 		kept := make([]parsedNovelChapter, 0, len(chapters))
 		dropped := 0
 		for _, chapter := range chapters {
-			if utf8.RuneCountInString(strings.TrimSpace(chapter.Content)) < novelImportMinChapterChars {
+			thin := utf8.RuneCountInString(strings.TrimSpace(chapter.Content)) < novelImportMinChapterChars
+			structural := novelImportStructuralTitlePattern.MatchString(chapter.Title)
+			if thin || structural {
 				dropped++
 				continue
 			}

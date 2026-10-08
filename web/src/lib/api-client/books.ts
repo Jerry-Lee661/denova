@@ -67,7 +67,7 @@ export async function previewNovelImportStream(
 
 export async function importNovel(
   file: File,
-  options: { bookTitle?: string; author?: string; description?: string; sampleChars?: number; splitRegex?: string; splitStrategy?: string } = {},
+  options: { bookTitle?: string; author?: string; description?: string; sampleChars?: number; splitRegex?: string; splitStrategy?: string; targetProjectId?: string } = {},
 ): Promise<NovelImportResult> {
   const form = new FormData()
   form.append('file', file)
@@ -77,6 +77,7 @@ export async function importNovel(
   if (options.sampleChars !== undefined) form.append('sample_chars', String(options.sampleChars))
   if (options.splitRegex !== undefined) form.append('split_regex', options.splitRegex)
   if (options.splitStrategy) form.append('split_strategy', options.splitStrategy)
+  if (options.targetProjectId) form.append('target_project_id', options.targetProjectId)
   return requestJSON('/api/books/import-novel', {
     method: 'POST',
     body: form,

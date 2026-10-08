@@ -1,4 +1,8 @@
 const novelImport = {
+  'novelImport.appendHint': '章节将追加到所选书籍：编号接续现有章节，同名卷自动合并。',
+  'novelImport.chooseTargetBook': '请选择要导入到的书籍',
+  'novelImport.targetNew': '创建为新书',
+  'novelImport.importTarget': '导入到',
   'novelImport.title': '导入现有小说',
   'novelImport.description': '从 txt/md/chm/epub 导入已有小说，自动解析章节并创建为新书。',
   'novelImport.chooseFile': '选择文件',

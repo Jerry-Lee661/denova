@@ -56,7 +56,7 @@ func TestPreviewNovelImportCHMSplitsByTableOfContents(t *testing.T) {
 
 func TestImportNovelToWorkspaceWritesCHMChapters(t *testing.T) {
 	workspace := t.TempDir()
-	preview, paths, err := ImportNovelToWorkspace(workspace, "初雪.chm", chmSampleBytes(t))
+	preview, paths, _, err := ImportNovelToWorkspace(workspace, "初雪.chm", chmSampleBytes(t))
 	if err != nil {
 		t.Fatalf("ImportNovelToWorkspace: %v", err)
 	}
