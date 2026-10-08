@@ -3,6 +3,7 @@ package book
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/text/encoding/simplifiedchinese"
@@ -465,5 +466,45 @@ func TestPreviewNovelImportRejectsUnsupportedFiles(t *testing.T) {
 	}
 	if _, err := PreviewNovelImport("novel.txt", []byte{0xff, 0xfe}); err == nil {
 		t.Fatalf("expected utf-8 error")
+	}
+}
+
+func TestPreviewNovelImportSkipsPlaceholderChapters(t *testing.T) {
+	long := strings.Repeat("雪落在窗台上，映着微弱的灯光。", 14)
+	content := "第一章 长夜\n" + long + "\n第二章 短语\n只有一行。\n第三章 微光\n" + strings.Repeat("灯影摇曳，夜色渐深。", 22) + "\n"
+	preview, err := PreviewNovelImport("样本.txt", []byte(content), NovelImportOptions{SkipPlaceholderChapters: true})
+	if err != nil {
+		t.Fatalf("PreviewNovelImport: %v", err)
+	}
+	if preview.ChapterCount != 2 {
+		t.Fatalf("ChapterCount = %d, want 2", preview.ChapterCount)
+	}
+	if preview.Chapters[0].Title != "第一章 长夜" || preview.Chapters[1].Title != "第三章 微光" {
+		t.Fatalf("chapters = %q/%q, want the two long chapters", preview.Chapters[0].Title, preview.Chapters[1].Title)
+	}
+	found := false
+	for _, warning := range preview.Warnings {
+		if warning == NovelImportPlaceholderSkippedWarningPrefix+"1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("warnings = %v, want placeholder skipped warning", preview.Warnings)
+	}
+}
+
+func TestPreviewNovelImportKeepsAllTinyChaptersWhenNothingSurvives(t *testing.T) {
+	content := "第一章 一\n短。\n第二章 二\n也很短。\n"
+	preview, err := PreviewNovelImport("样本.txt", []byte(content), NovelImportOptions{SkipPlaceholderChapters: true})
+	if err != nil {
+		t.Fatalf("PreviewNovelImport: %v", err)
+	}
+	if preview.ChapterCount != 2 {
+		t.Fatalf("ChapterCount = %d, want 2: a book of only tiny chapters keeps them", preview.ChapterCount)
+	}
+	for _, warning := range preview.Warnings {
+		if strings.HasPrefix(warning, NovelImportPlaceholderSkippedWarningPrefix) {
+			t.Fatalf("unexpected placeholder warning: %q", warning)
+		}
 	}
 }
