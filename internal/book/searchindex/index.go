@@ -342,6 +342,12 @@ func embedChunks(ctx context.Context, indexDir string, embedder Embedder, chunks
 			return nil, err
 		}
 		for index, vector := range embedded {
+			if len(vector) == 0 {
+				// The endpoint rejected this single input (for example one
+				// longer than its physical batch); this chunk stays
+				// keyword-only instead of failing the whole build.
+				continue
+			}
 			cache[missingKeys[index]] = normalizeVector(vector)
 		}
 	}
@@ -350,7 +356,7 @@ func embedChunks(ctx context.Context, indexDir string, embedder Embedder, chunks
 	for index := range chunks {
 		vector := cache[keys[index]]
 		if len(vector) == 0 {
-			return nil, fmt.Errorf("embedding cache is missing the vector for chunk %d", index)
+			continue
 		}
 		if dim == 0 {
 			dim = len(vector)
@@ -358,6 +364,9 @@ func embedChunks(ctx context.Context, indexDir string, embedder Embedder, chunks
 			return nil, fmt.Errorf("inconsistent embedding dimension %d and %d", len(vector), dim)
 		}
 		vectors[index] = vector
+	}
+	if dim == 0 {
+		return nil, fmt.Errorf("the embedding endpoint produced no vectors for %d chunks", len(chunks))
 	}
 	saveEmbedCache(indexDir, keys, vectors)
 	return vectors, nil
@@ -388,11 +397,23 @@ func persist(indexDir string, m manifest, idx *sourceIndex) error {
 		return err
 	}
 	vectorsPath := filepath.Join(indexDir, vectorsFileName)
-	if len(idx.vectors) > 0 && len(idx.vectors[0]) > 0 {
-		m.EmbedDim = len(idx.vectors[0])
+	vectorDim := 0
+	for _, vector := range idx.vectors {
+		if len(vector) > 0 {
+			vectorDim = len(vector)
+			break
+		}
+	}
+	if vectorDim > 0 {
+		m.EmbedDim = vectorDim
 		if err := writeFileAtomic(vectorsPath, func(writer io.Writer) error {
 			buffered := bufio.NewWriter(writer)
 			for _, vector := range idx.vectors {
+				if len(vector) != vectorDim {
+					// A chunk the endpoint rejected keeps a zero vector so the
+					// dense file stays aligned; zeros never win a cosine ranking.
+					vector = make([]float32, vectorDim)
+				}
 				if err := binary.Write(buffered, binary.LittleEndian, vector); err != nil {
 					return err
 				}
@@ -516,10 +537,19 @@ func loadEmbedCache(indexDir string) map[string][]float32 {
 }
 
 func saveEmbedCache(indexDir string, keys []string, vectors [][]float32) {
-	if len(keys) == 0 || len(vectors) == 0 || len(vectors[0]) == 0 {
+	if len(keys) == 0 || len(vectors) == 0 {
 		return
 	}
-	dim := len(vectors[0])
+	dim := 0
+	for _, vector := range vectors {
+		if len(vector) > 0 {
+			dim = len(vector)
+			break
+		}
+	}
+	if dim == 0 {
+		return
+	}
 	var buffer bytes.Buffer
 	buffer.WriteString(embedCacheMagic)
 	_ = binary.Write(&buffer, binary.LittleEndian, uint32(dim))

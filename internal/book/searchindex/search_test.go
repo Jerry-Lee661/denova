@@ -136,6 +136,58 @@ func TestEmbeddingCacheAvoidsReembeddingUnchangedChunks(t *testing.T) {
 	}
 }
 
+// rejectingEmbedder refuses marked texts so tests can prove that one rejected
+// input keeps keyword coverage instead of failing the whole index.
+type rejectingEmbedder struct{ model string }
+
+func (r *rejectingEmbedder) Model() string { return r.model }
+
+func (r *rejectingEmbedder) EmbedQuery(_ context.Context, text string) ([]float32, error) {
+	return conceptVector(text), nil
+}
+
+func (r *rejectingEmbedder) EmbedDocuments(_ context.Context, texts []string) ([][]float32, error) {
+	vectors := make([][]float32, len(texts))
+	for index, text := range texts {
+		if strings.Contains(text, "巨长段落") {
+			continue
+		}
+		vectors[index] = conceptVector(text)
+	}
+	return vectors, nil
+}
+
+func TestRejectedChunkKeepsKeywordCoverageAndIndexReloads(t *testing.T) {
+	workspace := t.TempDir()
+	writeWorkspaceFile(t, workspace, "chapters/第001章.md", "# 一\n\n林澈背着一柄长剑走进山门。")
+	writeWorkspaceFile(t, workspace, "chapters/第002章.md", "# 二\n\n巨长段落里藏着独特词汇云海灯。")
+	indexDir := filepath.Join(t.TempDir(), "search-index")
+	options := Options{Workspace: workspace, IndexDir: indexDir, Embedder: &rejectingEmbedder{model: "rejecting"}}
+
+	results, err := Search(context.Background(), options, "独特词汇", 5)
+	if err != nil {
+		t.Fatalf("search with a rejected input: %v", err)
+	}
+	found := false
+	for _, result := range results {
+		if result.Path == "chapters/第002章.md" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("keyword channel lost the rejected chunk: %+v", results)
+	}
+	// The persisted index must stay aligned and reusable after a reload.
+	memoryCache.Delete(indexDir)
+	reloaded, err := Search(context.Background(), options, "长剑", 5)
+	if err != nil {
+		t.Fatalf("reloaded search: %v", err)
+	}
+	if len(reloaded) == 0 || reloaded[0].Path != "chapters/第001章.md" {
+		t.Fatalf("reloaded index lost content: %+v", reloaded)
+	}
+}
+
 func TestKeywordOnlyWorksWithoutEmbedder(t *testing.T) {
 	workspace, indexDir := testWorkspace(t)
 	results, err := Search(context.Background(), Options{Workspace: workspace, IndexDir: indexDir}, "长剑", 5)

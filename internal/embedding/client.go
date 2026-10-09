@@ -74,7 +74,10 @@ func (c *Client) EmbedQuery(ctx context.Context, text string) ([]float32, error)
 }
 
 // EmbedDocuments embeds index documents in batches with the document prefix.
-// The result order matches the input order.
+// The result order matches the input order. A batch the endpoint rejects (for
+// example because one input exceeds its physical batch) is retried item by
+// item so a single unsupported input cannot fail the whole build; rejected
+// inputs yield a nil vector and the caller keeps keyword coverage for them.
 func (c *Client) EmbedDocuments(ctx context.Context, texts []string) ([][]float32, error) {
 	if len(texts) == 0 {
 		return nil, nil
@@ -91,11 +94,32 @@ func (c *Client) EmbedDocuments(ctx context.Context, texts []string) ([][]float3
 		}
 		embedded, err := c.embed(ctx, batch)
 		if err != nil {
-			return nil, err
+			embedded, ok := c.embedIndividually(ctx, batch)
+			if !ok {
+				return nil, err
+			}
+			vectors = append(vectors, embedded...)
+			continue
 		}
 		vectors = append(vectors, embedded...)
 	}
 	return vectors, nil
+}
+
+// embedIndividually retries each input of a rejected batch on its own and
+// reports whether at least one succeeded. Failed inputs keep a nil slot.
+func (c *Client) embedIndividually(ctx context.Context, batch []string) ([][]float32, bool) {
+	vectors := make([][]float32, len(batch))
+	succeeded := 0
+	for index, text := range batch {
+		single, err := c.embed(ctx, []string{text})
+		if err != nil {
+			continue
+		}
+		vectors[index] = single[0]
+		succeeded++
+	}
+	return vectors, succeeded > 0
 }
 
 func (c *Client) embed(ctx context.Context, inputs []string) ([][]float32, error) {

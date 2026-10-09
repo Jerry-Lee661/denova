@@ -138,6 +138,64 @@ func TestEmbedRejectsErrorStatusAndCountMismatch(t *testing.T) {
 	}
 }
 
+func TestEmbedDocumentsFallsBackPerItemWhenBatchIsRejected(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Input []string `json:"input"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		for _, text := range body.Input {
+			if strings.Contains(text, "too-long") {
+				http.Error(w, `{"error":"input too large"}`, http.StatusInternalServerError)
+				return
+			}
+		}
+		data := make([]map[string]any, 0, len(body.Input))
+		for index := range body.Input {
+			data = append(data, map[string]any{"index": index, "embedding": []float32{1, 0}})
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
+	}))
+	defer server.Close()
+
+	client, err := New(testConfig(server.URL + "/v1"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	vectors, err := client.EmbedDocuments(context.Background(), []string{"a", "too-long text", "b", "c"})
+	if err != nil {
+		t.Fatalf("a rejected input must not fail the batch: %v", err)
+	}
+	if len(vectors) != 4 {
+		t.Fatalf("want 4 slots, got %d", len(vectors))
+	}
+	if len(vectors[1]) != 0 {
+		t.Fatalf("rejected input should keep a nil vector, got %v", vectors[1])
+	}
+	for _, index := range []int{0, 2, 3} {
+		if len(vectors[index]) != 2 {
+			t.Fatalf("input %d lost its vector: %v", index, vectors[index])
+		}
+	}
+}
+
+func TestEmbedDocumentsAllItemsRejectedReturnsError(t *testing.T) {
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer failing.Close()
+	client, err := New(testConfig(failing.URL + "/v1"))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := client.EmbedDocuments(context.Background(), []string{"a", "b"}); err == nil {
+		t.Fatal("when every input fails the call must report an error")
+	}
+}
+
 func TestNewValidation(t *testing.T) {
 	var calls atomic.Int32
 	if _, err := New(config.EmbeddingConfig{}); err == nil {
