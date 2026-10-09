@@ -23,7 +23,9 @@ interface VolumePathInput {
 export function allocateChapterPath({ chapters, title, volumePath, format, chapterLabel }: ChapterPathInput) {
   const existingPaths = new Set(chapters.map((chapter) => chapter.path))
   const attemptedPaths = new Set<string>()
-  let order = Math.max(0, ...chapters.map((chapter) => chapter.index)) + 1
+  // Fractional indexes (ch00001.5) belong between whole chapters, so the next
+  // appended chapter is the first whole number past the highest one.
+  let order = Math.floor(Math.max(0, ...chapters.map((chapter) => chapter.index))) + 1
   while (true) {
     const filename = formatName(format || DEFAULT_CHAPTER_FILENAME_FORMAT, {
       order,

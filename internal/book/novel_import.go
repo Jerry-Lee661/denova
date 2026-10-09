@@ -34,11 +34,6 @@ const (
 	NovelImportRegexFallbackWarningPrefix = "novel_import_regex_fallback:"
 )
 
-// novelImportStructuralTitlePattern matches front- and back-matter titles
-// (prefaces, copyright pages, production notes) that are structural
-// regardless of length.
-var novelImportStructuralTitlePattern = regexp.MustCompile(`(?i)^(?:前言|序章|序言|自序|译序|原序|序|引子|楔子|后记|尾声|结语|结束语|制作说明|版权信息|版权页|出版说明|出版信息|目录|更新日志|修订说明|鸣谢|致谢|参考资料|参考文献|序论|总序|(?:prologue|epilogue|preface|foreword|afterword|copyright|acknowledg\w*|table of contents))\s*[：:·—\-–]?`)
-
 const (
 	NovelImportLanguageChinese = "zh"
 	NovelImportLanguageEnglish = "en"
@@ -49,7 +44,7 @@ var (
 	mdHeadingRe      = regexp.MustCompile(`^\s{0,3}#{1,6}\s+(.+?)\s*$`)
 	cnChapterRe      = regexp.MustCompile(`^\s*第[0-9零〇一二三四五六七八九十百千万两]+[章节回集][^\n\r]{0,80}$`)
 	cnVolumeRe       = regexp.MustCompile(`^\s*(?:第[0-9零〇一二三四五六七八九十百千万两]+[卷部]|卷[0-9零〇一二三四五六七八九十百千万两]+|[0-9零〇一二三四五六七八九十百千万两]+卷|[上下前后终][卷部])[^\n\r]{0,80}$`)
-	prefaceTitleRe   = regexp.MustCompile(`^\s*(?:(?:序章|楔子|引子|前言|序幕|序言|尾声|后记|番外)(?:\s*[0-9零〇一二三四五六七八九十百千万两]*\s*(?:[:：、\-—.．]\s*)?[^\n\r]{0,80})?|序(?:\s*[:：、\-—.．]\s*[^\n\r]{0,80})?)\s*$`)
+	prefaceTitleRe   = regexp.MustCompile(`^\s*(?:(?:序章|楔子|引子|前言|序幕|序言|尾声|后记|番外|间章)(?:\s*[0-9零〇一二三四五六七八九十百千万两]*\s*(?:[:：、\-—.．]\s*)?[^\n\r]{0,80})?|序(?:\s*[:：、\-—.．]\s*[^\n\r]{0,80})?)\s*$`)
 	enChapterRe      = regexp.MustCompile(`(?i)^\s*chapter\s+[0-9ivxlcdm]+[^\n\r]{0,80}$`)
 	enVolumeRe       = regexp.MustCompile(`(?i)^\s*(?:part|volume)\s+[0-9ivxlcdm]+[^\n\r]{0,80}$`)
 	enSpecialTitleRe = regexp.MustCompile(`(?i)^\s*(prologue|epilogue)\b`)
@@ -63,11 +58,11 @@ type localChapterRegexCandidate struct {
 }
 
 var localChapterRegexCandidates = []localChapterRegexCandidate{
-	{name: "common_novel_title", pattern: `(?i)^\s*((?:第[0-9零〇一二三四五六七八九十百千万两]+[章节卷回部集]|卷[0-9零〇一二三四五六七八九十百千万两]+|[0-9零〇一二三四五六七八九十百千万两]+卷|[上下前后终][卷部]|序章|楔子|引子|前言|序幕|序言|尾声|后记|番外|chapter\s+[0-9ivxlcdm]+|part\s+[0-9ivxlcdm]+|volume\s+[0-9ivxlcdm]+)[^\n\r]{0,80})$`},
+	{name: "common_novel_title", pattern: `(?i)^\s*((?:第[0-9零〇一二三四五六七八九十百千万两]+[章节卷回部集]|卷[0-9零〇一二三四五六七八九十百千万两]+|[0-9零〇一二三四五六七八九十百千万两]+卷|[上下前后终][卷部]|序章|楔子|引子|前言|序幕|序言|尾声|后记|番外|间章|chapter\s+[0-9ivxlcdm]+|part\s+[0-9ivxlcdm]+|volume\s+[0-9ivxlcdm]+)[^\n\r]{0,80})$`},
 	{name: "markdown", pattern: `^\s{0,3}#{1,6}\s+(.+?)\s*$`},
 	{name: "cn_chapter", pattern: `^\s*(第[0-9零〇一二三四五六七八九十百千万两]+[章节回集][^\n\r]{0,80})$`},
 	{name: "cn_volume", pattern: `^\s*((?:第[0-9零〇一二三四五六七八九十百千万两]+[卷部]|卷[0-9零〇一二三四五六七八九十百千万两]+|[0-9零〇一二三四五六七八九十百千万两]+卷|[上下前后终][卷部])[^\n\r]{0,80})$`},
-	{name: "preface_or_epilogue", pattern: `^\s*((?:(?:序章|楔子|引子|前言|序幕|序言|尾声|后记|番外)(?:\s*[0-9零〇一二三四五六七八九十百千万两]*\s*(?:[:：、\-—.．]\s*)?[^\n\r]{0,80})?|序(?:\s*[:：、\-—.．]\s*[^\n\r]{0,80})?))\s*$`},
+	{name: "preface_or_epilogue", pattern: `^\s*((?:(?:序章|楔子|引子|前言|序幕|序言|尾声|后记|番外|间章)(?:\s*[0-9零〇一二三四五六七八九十百千万两]*\s*(?:[:：、\-—.．]\s*)?[^\n\r]{0,80})?|序(?:\s*[:：、\-—.．]\s*[^\n\r]{0,80})?))\s*$`},
 	{name: "en_chapter", pattern: `(?i)^\s*(chapter\s+[0-9ivxlcdm]+[^\n\r]{0,80})$`},
 	{name: "en_volume", pattern: `(?i)^\s*((?:part|volume)\s+[0-9ivxlcdm]+[^\n\r]{0,80})$`},
 	{name: "numbered_title", pattern: `^\s*([0-9]{1,4}[\.、]\s*[^\n\r]{1,80})$`},
@@ -101,12 +96,12 @@ type NovelImportPreview struct {
 
 // NovelImportChapter is a parsed source chapter.
 type NovelImportChapter struct {
-	Index      int    `json:"index"`
-	Title      string `json:"title"`
-	Chars      int    `json:"chars"`
-	Path       string `json:"path,omitempty"`
-	Volume     string `json:"volume,omitempty"`
-	VolumePath string `json:"volume_path,omitempty"`
+	Index      float64 `json:"index"`
+	Title      string  `json:"title"`
+	Chars      int     `json:"chars"`
+	Path       string  `json:"path,omitempty"`
+	Volume     string  `json:"volume,omitempty"`
+	VolumePath string  `json:"volume_path,omitempty"`
 }
 
 type parsedNovelChapter struct {
@@ -165,6 +160,7 @@ type workspaceChapterState struct {
 	maxVolumeIndex  int
 	volumeDirs      map[string]string // display name -> slash dir path
 	existingFiles   map[string]bool   // slash chapter paths already on disk
+	hasChapters     bool              // any chNNNNN file already exists
 }
 
 func scanWorkspaceChapters(workspace string) workspaceChapterState {
@@ -202,6 +198,7 @@ func scanWorkspaceChapters(workspace string) workspaceChapterState {
 			}
 			state.existingFiles[rel] = true
 			if matches := hiddenChapterPrefixPattern.FindStringSubmatch(name); matches != nil {
+				state.hasChapters = true
 				index, _ := strconv.Atoi(matches[1])
 				if index > state.maxChapterIndex {
 					state.maxChapterIndex = index
@@ -254,13 +251,14 @@ func ImportNovelToWorkspace(workspace, filename string, data []byte, opts ...Nov
 	paths := make([]string, 0, len(parsed.Chapters))
 	written := make([]string, len(parsed.Chapters))
 	skippedExisting := 0
+	continuing := state.hasChapters
 	for i, chapter := range parsed.Chapters {
 		index := chapter.Index
-		if state.maxChapterIndex > 0 {
-			index = state.maxChapterIndex + i + 1
+		if continuing {
+			index = float64(state.maxChapterIndex + i + 1)
 		}
 		rel := chapter.Path
-		if rel == "" || state.maxChapterIndex > 0 || state.maxVolumeIndex > 0 {
+		if rel == "" || continuing || state.maxVolumeIndex > 0 {
 			rel = chapterPath(index, chapter.Title, chapter.Volume, volumePaths, parsed.Preview.Language)
 		}
 		if state.existingFiles[rel] {
@@ -295,6 +293,7 @@ func parseNovelImport(filename string, data []byte, opts NovelImportOptions) (pa
 	if len(data) == 0 {
 		return parsedNovel{}, fmt.Errorf("文件为空")
 	}
+	opts.sourceExt = ext
 	slog.InfoContext(context.Background(), fmt.Sprintf("[novel-import] parse begin filename=%q bytes=%d sample_chars=%d requested_strategy=%q has_split_regex=%t", name, len(data), opts.SampleChars, opts.SplitStrategy, opts.SplitRegex != ""))
 	var chapters []parsedNovelChapter
 	var text, splitStrategy, splitRegex string
@@ -345,7 +344,6 @@ func parseNovelImport(filename string, data []byte, opts NovelImportOptions) (pa
 			return parsedNovel{}, err
 		}
 	}
-	opts.sourceExt = ext
 	language := detectNovelImportLanguage(text)
 	chapterFilenameFormat := chapterFilenameFormatForLanguage(language)
 	volumeDirFormat := volumeDirFormatForLanguage(language)
@@ -353,28 +351,7 @@ func parseNovelImport(filename string, data []byte, opts NovelImportOptions) (pa
 	title := strings.TrimSuffix(filepath.Base(name), filepath.Ext(name))
 	totalChars := 0
 	volumePaths := assignVolumePaths(chapters)
-	// Honor ordinals the author embedded in chapter titles (第一章 → 1) so
-	// filenames keep matching titles even when placeholder chapters were
-	// skipped; titles without ordinals fill the remaining slots in reading
-	// order.
-	usedIndexes := map[int]bool{}
-	for i := range chapters {
-		if n, ok := chapterNumberFromTitle(chapters[i].Title); ok && n <= 99999 && !usedIndexes[n] {
-			chapters[i].Index = n
-			usedIndexes[n] = true
-		}
-	}
-	nextFree := 1
-	for i := range chapters {
-		if chapters[i].Index > 0 {
-			continue
-		}
-		for usedIndexes[nextFree] {
-			nextFree++
-		}
-		chapters[i].Index = nextFree
-		usedIndexes[nextFree] = true
-	}
+	assignChapterIndexes(chapters)
 	for i := range chapters {
 		if ext == ".txt" {
 			chapters[i].Content = formatPlainTextChapterForMarkdown(chapters[i].Content)
@@ -837,7 +814,7 @@ func firstRunes(value string, max int) string {
 	return string(runes[:max])
 }
 
-func chapterPath(index int, title, volume string, volumePaths map[string]string, language string) string {
+func chapterPath(index float64, title, volume string, volumePaths map[string]string, language string) string {
 	filename := chapterFilename(index, title, language)
 	if strings.TrimSpace(volume) == "" {
 		return filepath.ToSlash(filepath.Join("chapters", filename))
@@ -849,7 +826,7 @@ func chapterPath(index int, title, volume string, volumePaths map[string]string,
 	return filepath.ToSlash(filepath.Join(volumePath, filename))
 }
 
-func chapterFilename(index int, title, language string) string {
+func chapterFilename(index float64, title, language string) string {
 	cleanTitle := safeFilenamePart(title)
 	if cleanTitle == "" {
 		cleanTitle = "chapter"
@@ -860,7 +837,7 @@ func chapterFilename(index int, title, language string) string {
 		chapterPart = safeFilenamePart(split.chapter)
 		titlePart = safeFilenamePart(split.title)
 	}
-	parts := []string{fmt.Sprintf("ch%05d", index), chapterPart}
+	parts := []string{chapterOrderText(index), chapterPart}
 	if titlePart != "" {
 		parts = append(parts, titlePart)
 	}
@@ -907,7 +884,7 @@ func splitChapterTitleForFilename(title, language string) splitChapterFilenamePa
 	default:
 		patterns = []*regexp.Regexp{
 			regexp.MustCompile(`^(第[0-9零〇一二三四五六七八九十百千万两]+[章节回集])[\s:：、\-—.．]*(.*)$`),
-			regexp.MustCompile(`^((?:序章|楔子|引子|前言|序幕|序言|尾声|后记|番外))[\s:：、\-—.．]*(.*)$`),
+			regexp.MustCompile(`^((?:序章|楔子|引子|前言|序幕|序言|尾声|后记|番外|间章))[\s:：、\-—.．]*(.*)$`),
 		}
 	}
 	for _, pattern := range patterns {

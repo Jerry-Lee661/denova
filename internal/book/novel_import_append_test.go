@@ -100,7 +100,9 @@ func TestImportNovelToWorkspaceAppendsToExistingBook(t *testing.T) {
 	if err := NewState(workspace).InitWorkspace(); err != nil {
 		t.Fatalf("InitWorkspace failed: %v", err)
 	}
-	// First import seeds the book: ch00001..ch00004 plus volume v00001-附录.
+	// First import seeds the book: ch00001..ch00003 for the numbered chapters
+	// plus fractional slots for the unnumbered appendix leaves, and volume
+	// v00001-附录.
 	if _, _, _, err := ImportNovelToWorkspace(workspace, "初雪.epub", sampleEPUBBytes(t)); err != nil {
 		t.Fatalf("seed import failed: %v", err)
 	}
@@ -115,10 +117,11 @@ func TestImportNovelToWorkspaceAppendsToExistingBook(t *testing.T) {
 	if len(paths) != 3 {
 		t.Fatalf("paths = %v, want 3 new chapters", paths)
 	}
+	// The seed's highest whole number is 3, so appended chapters continue at 4.
 	wantPaths := []string{
-		"chapters/v00001-附录/ch00007-附录续篇.md",
-		"chapters/v00002-卷丙/ch00008-新章一.md",
-		"chapters/v00002-卷丙/ch00009-新章二.md",
+		"chapters/v00001-附录/ch00004-附录续篇.md",
+		"chapters/v00002-卷丙/ch00005-新章一.md",
+		"chapters/v00002-卷丙/ch00006-新章二.md",
 	}
 	for i, want := range wantPaths {
 		if paths[i] != want {
@@ -131,7 +134,7 @@ func TestImportNovelToWorkspaceAppendsToExistingBook(t *testing.T) {
 	// The seeded chapters are untouched.
 	for _, seeded := range []string{
 		"chapters/ch00001-第一章-初雪.md",
-		"chapters/v00001-附录/ch00004-附录图表-·-附录A.md",
+		"chapters/v00001-附录/ch00003.25-附录图表-·-附录A.md",
 	} {
 		if _, err := os.Stat(filepath.Join(workspace, filepath.FromSlash(seeded))); err != nil {
 			t.Fatalf("seeded chapter vanished: %v", err)

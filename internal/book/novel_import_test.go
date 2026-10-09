@@ -471,7 +471,8 @@ func TestPreviewNovelImportRejectsUnsupportedFiles(t *testing.T) {
 
 func TestPreviewNovelImportImportsEverythingForContainers(t *testing.T) {
 	// 全量导入: nothing is dropped, and chapter numbers come from the titles
-	// themselves (前言 has no ordinal → 1; 第三章 keeps its own 3).
+	// themselves (第三章 keeps its own 3) while 前言 keeps its reading position
+	// as front matter (ch00000).
 	content := "前言\n" + strings.Repeat("说明本书的整理与翻译过程。", 30) + "\n第一章 长夜\n" + strings.Repeat("雪落在窗台上，映着微弱的灯光。", 34) + "\n第二章 短语\n只有一行。\n第三章 微光\n" + strings.Repeat("灯影摇曳，夜色渐深。", 52) + "\n"
 	preview, err := PreviewNovelImport("样本.txt", []byte(content))
 	if err != nil {
@@ -481,13 +482,16 @@ func TestPreviewNovelImportImportsEverythingForContainers(t *testing.T) {
 		t.Fatalf("ChapterCount = %d, want 4", preview.ChapterCount)
 	}
 	wantTitles := []string{"前言", "第一章 长夜", "第二章 短语", "第三章 微光"}
-	wantIndexes := []int{4, 1, 2, 3}
+	wantIndexes := []float64{0, 1, 2, 3}
 	for i := range wantTitles {
 		if preview.Chapters[i].Title != wantTitles[i] {
 			t.Fatalf("Chapters[%d].Title = %q, want %q", i, preview.Chapters[i].Title, wantTitles[i])
 		}
 		if preview.Chapters[i].Index != wantIndexes[i] {
-			t.Fatalf("Chapters[%d].Index = %d, want %d", i, preview.Chapters[i].Index, wantIndexes[i])
+			t.Fatalf("Chapters[%d].Index = %v, want %v", i, preview.Chapters[i].Index, wantIndexes[i])
 		}
+	}
+	if preview.Chapters[0].Path != "chapters/ch00000-前言.md" {
+		t.Fatalf("Chapters[0].Path = %q, want chapters/ch00000-前言.md", preview.Chapters[0].Path)
 	}
 }

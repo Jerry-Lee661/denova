@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -32,8 +33,8 @@ type WorkspaceSummary struct {
 type ChapterSummary struct {
 	Path         string `json:"path"`
 	FileName     string `json:"file_name"`
-	DisplayTitle string `json:"display_title"`
-	Index        int    `json:"index"`
+	DisplayTitle string  `json:"display_title"`
+	Index        float64 `json:"index"`
 	Words        int    `json:"words"`
 	Status       string `json:"status"`
 	Confirmed    bool   `json:"confirmed"`
@@ -57,7 +58,7 @@ var chineseChapterNamePattern = regexp.MustCompile(`^第([0-9零〇一二三四�
 var chineseOrderedNamePattern = regexp.MustCompile(`^第([0-9零〇一二三四五六七八九十百千万两]+)[章节回集卷部][-_ 、.．]*(.*)$`)
 var englishChapterNamePattern = regexp.MustCompile(`(?i)^(?:chapter|ch)[-_ ]*([0-9ivxlcdm]+)[-_ .:：]*(.*)$`)
 var prefaceChapterNamePattern = regexp.MustCompile(`^(序章|序幕|楔子|引子|前言|正文)[-_ 、.．]*(.*)$`)
-var hiddenChapterPrefixPattern = regexp.MustCompile(`(?i)^ch(\d{5})[-_ ]+(.*)$`)
+var hiddenChapterPrefixPattern = regexp.MustCompile(`(?i)^ch(\d{5})(?:\.(\d+))?[-_ ]+(.*)$`)
 var hiddenVolumePrefixPattern = regexp.MustCompile(`(?i)^v(\d{5})[-_ ]+(.*)$`)
 var groupNamePattern = regexp.MustCompile(`(?i)^group(\d+)[-_ ]*(.*)$`)
 
@@ -68,7 +69,7 @@ type chapterNameMeta struct {
 
 type chapterSortKey struct {
 	ok    bool
-	order int
+	order float64
 }
 
 // Summary 统计 workspace 的章节进度和书籍元信息。
@@ -269,7 +270,7 @@ func chapterDisplayTitle(name string) string {
 
 func visibleNameBase(base string) string {
 	if matches := hiddenChapterPrefixPattern.FindStringSubmatch(base); len(matches) > 0 {
-		return matches[2]
+		return matches[3]
 	}
 	if matches := hiddenVolumePrefixPattern.FindStringSubmatch(base); len(matches) > 0 {
 		return matches[2]
@@ -433,13 +434,13 @@ func groupDisplayTitle(name string) string {
 	return matches[1] + " " + title
 }
 
-func chapterIndex(name string) int {
+func chapterIndex(name string) float64 {
 	base := strings.TrimSuffix(name, filepath.Ext(name))
-	if order := hiddenSortOrder(base); order > 0 {
+	if order, ok := hiddenSortOrder(base); ok {
 		return order
 	}
 	meta, _ := parseChapterNameMeta(visibleNameBase(base))
-	return meta.index
+	return float64(meta.index)
 }
 
 func compareChapterLikeNames(left, right string) int {
@@ -464,7 +465,7 @@ func compareChapterLikeNames(left, right string) int {
 
 func chapterSortKeyForName(name string) chapterSortKey {
 	base := strings.TrimSuffix(name, filepath.Ext(name))
-	if order := hiddenSortOrder(base); order > 0 {
+	if order, ok := hiddenSortOrder(base); ok {
 		return chapterSortKey{ok: true, order: order}
 	}
 	base = visibleNameBase(base)
@@ -472,24 +473,35 @@ func chapterSortKeyForName(name string) chapterSortKey {
 		return chapterSortKey{ok: true, order: 0}
 	}
 	if meta, ok := parseChapterNameMeta(base); ok && meta.index > 0 {
-		return chapterSortKey{ok: true, order: meta.index}
+		return chapterSortKey{ok: true, order: float64(meta.index)}
 	}
 	if matches := chineseOrderedNamePattern.FindStringSubmatch(base); len(matches) > 0 {
 		if index := parseChapterOrdinal(matches[1]); index > 0 {
-			return chapterSortKey{ok: true, order: index}
+			return chapterSortKey{ok: true, order: float64(index)}
 		}
 	}
 	return chapterSortKey{}
 }
 
-func hiddenSortOrder(base string) int {
+// hiddenSortOrder reads the ordering token of a hidden-prefix name. Chapter
+// tokens keep their fractional part so ch00001.5 (an unnumbered chapter
+// between 第一章 and 第二章) sorts before ch00002.
+func hiddenSortOrder(base string) (float64, bool) {
 	if matches := hiddenChapterPrefixPattern.FindStringSubmatch(base); len(matches) > 0 {
-		return parsePositiveInt(matches[1])
+		order := parsePositiveInt(matches[1])
+		if matches[2] != "" {
+			fraction, err := strconv.ParseFloat("0."+matches[2], 64)
+			if err != nil {
+				return 0, false
+			}
+			return float64(order) + fraction, true
+		}
+		return float64(order), true
 	}
 	if matches := hiddenVolumePrefixPattern.FindStringSubmatch(base); len(matches) > 0 {
-		return parsePositiveInt(matches[1])
+		return float64(parsePositiveInt(matches[1])), true
 	}
-	return 0
+	return 0, false
 }
 
 func chapterPlanIndex(path string) int {
