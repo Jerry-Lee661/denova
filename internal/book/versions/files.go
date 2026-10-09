@@ -69,7 +69,14 @@ func collectVersionFiles(root, base string, store gitstorer.EncodedObjectStorer)
 			return fmt.Errorf("inspect version file %q: %w", path, err)
 		}
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return nil
+			// Windows directory scans report cloud placeholders (OneDrive
+			// Files On-Demand) as irregular; Lstat resolves them as regular
+			// files. Skipping them here would drop real chapters from the
+			// snapshot.
+			info, err = os.Lstat(path)
+			if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+				return nil
+			}
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {

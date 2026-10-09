@@ -170,11 +170,21 @@ func preflightDirectory(current, relative string) error {
 			}
 			continue
 		}
-		if !info.Mode().IsRegular() {
+		if !info.Mode().IsRegular() && !isRegularOnLstat(filepath.Join(current, name)) {
 			return fmt.Errorf("portable preflight rejects non-regular entries: %s", filepath.Join(current, name))
 		}
 	}
 	return nil
+}
+
+// isRegularOnLstat re-checks an entry whose directory scan reported a non-file
+// type. Windows directory listings mark every reparse point as irregular,
+// including cloud placeholders (OneDrive Files On-Demand) that are ordinary
+// files with remote-backed content; Lstat resolves them as regular. Genuine
+// special entries keep failing there, so they stay rejected.
+func isRegularOnLstat(path string) bool {
+	info, err := os.Lstat(path)
+	return err == nil && info.Mode()&os.ModeSymlink == 0 && info.Mode().IsRegular()
 }
 
 func isWindowsDeviceName(base string) bool {

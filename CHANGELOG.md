@@ -17,6 +17,11 @@ Denova records only major user-visible features, important compatibility or data
 - 小说导入支持 CHM 与 EPUB 文件：导入现有小说现在可以选择 `.chm`（微软编译 HTML 帮助）或 `.epub` 文件，并保留其自身的目录树结构——一级目录成为卷、三级条目成为章（章标题带上二级分组前缀），更深层内容并入所属章并按层级生成小节标题，未收录进目录的散页按所在文件夹归入同名卷；标题/正文自动识别 GBK/GB18030 等编码并转换为 Markdown。章节文件名优先采用章节标题自带的序号（第一章 → ch00001），无编号章节保留阅读位置：卷首的前言等内容编号为 ch00000，夹在编号章节之间的间章使用小数序号（第一章与第二章之间 → ch00001.5）。分章预览与确认导入流程与 txt/md 一致，也支持自定义正则重切，支持导入到已有书籍。
 - Novel import now supports CHM and EPUB files: importing an existing novel can pick `.chm` (Microsoft Compiled HTML Help) or `.epub` files and keeps their own table-of-contents structure — level-1 entries become volumes, level-3 entries become chapters titled with their level-2 group prefix, and deeper topics are merged into their chapter with hierarchical section headings; unlisted loose pages are grouped into a volume named after their folder. Titles and content are decoded from encodings such as GBK/GB18030 into Markdown. Chapter files prefer the numbering written in their titles (第一章 → ch00001), and unnumbered chapters keep their reading position: front matter such as a preface is numbered ch00000, and an interlude between numbered chapters takes a fractional slot (between 第一章 and 第二章 → ch00001.5). The preview and confirmation flow stays identical to txt/md, custom regex re-splitting still works, and imports can be appended to an existing book.
 
+### Fixed / 修复
+
+- 数据目录位于 OneDrive 等云同步目录时，章节文件被云端转成按需占位文件不再阻塞应用启动，也不会从版本快照中缺失；占位文件在读取时自动还原为本地内容。
+- Application no longer fails to start and version snapshots no longer lose chapters when chapter files inside a cloud-synced data directory (OneDrive Files On-Demand) are dehydrated to placeholders; reading hydrates them back automatically.
+
 ## [v0.5.1] - 2026-09-28
 
 ### Brief / 简要说明
