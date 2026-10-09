@@ -32,14 +32,6 @@ const (
 	NovelImportAgentFallbackWarning       = "novel_import_agent_fallback"
 	NovelImportRegexFewChaptersWarning    = "novel_import_regex_few_chapters"
 	NovelImportRegexFallbackWarningPrefix = "novel_import_regex_fallback:"
-
-	// novelImportMinChapterChars drops placeholder chapters (volume title
-	// pages, production notes) whose entire content is shorter than this many
-	// runes, so real chapters are not offset by structural filler. A book
-	// whose chapters are all below the floor keeps every chapter.
-	novelImportMinChapterChars = 500
-
-	NovelImportPlaceholderSkippedWarningPrefix = "novel_import_placeholder_skipped:"
 )
 
 // novelImportStructuralTitlePattern matches front- and back-matter titles
@@ -90,10 +82,6 @@ type NovelImportOptions struct {
 	SplitRegex      string
 	InferSplitRegex func(sample string) (string, error)
 	sourceExt       string
-	// SkipPlaceholderChapters drops chapters whose entire content is shorter
-	// than novelImportMinChapterChars runes (volume title pages, production
-	// notes), so real chapters are not offset by structural filler.
-	SkipPlaceholderChapters bool
 }
 
 // NovelImportPreview describes the chapters parsed from an uploaded novel file.
@@ -355,28 +343,6 @@ func parseNovelImport(filename string, data []byte, opts NovelImportOptions) (pa
 		if err != nil {
 			slog.ErrorContext(context.Background(), fmt.Sprintf("[novel-import] parse failed filename=%q err=%v", name, err))
 			return parsedNovel{}, err
-		}
-	}
-	// Drop placeholder chapters (volume title pages, production notes,
-	// prefaces and other non-formal entries) so real chapters are not offset
-	// by structural filler. A book whose chapters are all tiny keeps
-	// everything instead of coming out empty.
-	if opts.SkipPlaceholderChapters && len(chapters) > 1 {
-		kept := make([]parsedNovelChapter, 0, len(chapters))
-		dropped := 0
-		for _, chapter := range chapters {
-			thin := utf8.RuneCountInString(strings.TrimSpace(chapter.Content)) < novelImportMinChapterChars
-			structural := novelImportStructuralTitlePattern.MatchString(chapter.Title)
-			if thin || structural {
-				dropped++
-				continue
-			}
-			kept = append(kept, chapter)
-		}
-		if len(kept) > 0 && dropped > 0 {
-			chapters = kept
-			warnings = append(warnings, NovelImportPlaceholderSkippedWarningPrefix+strconv.Itoa(dropped))
-			slog.WarnContext(context.Background(), fmt.Sprintf("[novel-import] dropped %d placeholder chapters under %d chars", dropped, novelImportMinChapterChars))
 		}
 	}
 	opts.sourceExt = ext

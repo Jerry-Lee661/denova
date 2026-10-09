@@ -469,68 +469,25 @@ func TestPreviewNovelImportRejectsUnsupportedFiles(t *testing.T) {
 	}
 }
 
-func TestPreviewNovelImportSkipsPlaceholderChapters(t *testing.T) {
-	long := strings.Repeat("雪落在窗台上，映着微弱的灯光。", 34)
-	content := "第一章 长夜\n" + long + "\n第二章 短语\n只有一行。\n第三章 微光\n" + strings.Repeat("灯影摇曳，夜色渐深。", 52) + "\n"
-	preview, err := PreviewNovelImport("样本.txt", []byte(content), NovelImportOptions{SkipPlaceholderChapters: true})
+func TestPreviewNovelImportImportsEverythingForContainers(t *testing.T) {
+	// 全量导入: nothing is dropped, and chapter numbers come from the titles
+	// themselves (前言 has no ordinal → 1; 第三章 keeps its own 3).
+	content := "前言\n" + strings.Repeat("说明本书的整理与翻译过程。", 30) + "\n第一章 长夜\n" + strings.Repeat("雪落在窗台上，映着微弱的灯光。", 34) + "\n第二章 短语\n只有一行。\n第三章 微光\n" + strings.Repeat("灯影摇曳，夜色渐深。", 52) + "\n"
+	preview, err := PreviewNovelImport("样本.txt", []byte(content))
 	if err != nil {
 		t.Fatalf("PreviewNovelImport: %v", err)
 	}
-	if preview.ChapterCount != 2 {
-		t.Fatalf("ChapterCount = %d, want 2", preview.ChapterCount)
+	if preview.ChapterCount != 4 {
+		t.Fatalf("ChapterCount = %d, want 4", preview.ChapterCount)
 	}
-	if preview.Chapters[0].Title != "第一章 长夜" || preview.Chapters[1].Title != "第三章 微光" {
-		t.Fatalf("chapters = %q/%q, want the two long chapters", preview.Chapters[0].Title, preview.Chapters[1].Title)
-	}
-	found := false
-	for _, warning := range preview.Warnings {
-		if warning == NovelImportPlaceholderSkippedWarningPrefix+"1" {
-			found = true
+	wantTitles := []string{"前言", "第一章 长夜", "第二章 短语", "第三章 微光"}
+	wantIndexes := []int{4, 1, 2, 3}
+	for i := range wantTitles {
+		if preview.Chapters[i].Title != wantTitles[i] {
+			t.Fatalf("Chapters[%d].Title = %q, want %q", i, preview.Chapters[i].Title, wantTitles[i])
 		}
-	}
-	if !found {
-		t.Fatalf("warnings = %v, want placeholder skipped warning", preview.Warnings)
-	}
-}
-
-func TestPreviewNovelImportKeepsAllTinyChaptersWhenNothingSurvives(t *testing.T) {
-	content := "第一章 一\n短。\n第二章 二\n也很短。\n"
-	preview, err := PreviewNovelImport("样本.txt", []byte(content), NovelImportOptions{SkipPlaceholderChapters: true})
-	if err != nil {
-		t.Fatalf("PreviewNovelImport: %v", err)
-	}
-	if preview.ChapterCount != 2 {
-		t.Fatalf("ChapterCount = %d, want 2: a book of only tiny chapters keeps them", preview.ChapterCount)
-	}
-	for _, warning := range preview.Warnings {
-		if strings.HasPrefix(warning, NovelImportPlaceholderSkippedWarningPrefix) {
-			t.Fatalf("unexpected placeholder warning: %q", warning)
+		if preview.Chapters[i].Index != wantIndexes[i] {
+			t.Fatalf("Chapters[%d].Index = %d, want %d", i, preview.Chapters[i].Index, wantIndexes[i])
 		}
-	}
-}
-
-func TestPreviewNovelImportSkipsStructuralTitles(t *testing.T) {
-	preface := strings.Repeat("出版说明的内容，说明本书的整理与翻译过程。", 15)
-	prologue := strings.Repeat("风起于青萍之末。", 40)
-	real := strings.Repeat("他推开门，走进了大雪纷飞的夜。", 40)
-	content := "前言\n" + preface + "\n序章 风起\n" + prologue + "\n第一章 入城\n" + real + "\n"
-	preview, err := PreviewNovelImport("样本.txt", []byte(content), NovelImportOptions{SkipPlaceholderChapters: true})
-	if err != nil {
-		t.Fatalf("PreviewNovelImport: %v", err)
-	}
-	if preview.ChapterCount != 1 {
-		t.Fatalf("ChapterCount = %d, want 1", preview.ChapterCount)
-	}
-	if preview.Chapters[0].Title != "第一章 入城" {
-		t.Fatalf("chapter title = %q, want the formal chapter", preview.Chapters[0].Title)
-	}
-	skipped := false
-	for _, warning := range preview.Warnings {
-		if warning == NovelImportPlaceholderSkippedWarningPrefix+"2" {
-			skipped = true
-		}
-	}
-	if !skipped {
-		t.Fatalf("warnings = %v, want 2 skipped", preview.Warnings)
 	}
 }

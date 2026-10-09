@@ -203,7 +203,6 @@ func (h *Handlers) novelImportOptions(ctx context.Context, c *app.RequestContext
 	opts := book.NovelImportOptions{
 		SplitRegex:              strings.TrimSpace(string(c.FormValue("split_regex"))),
 		SplitStrategy:           strings.TrimSpace(string(c.FormValue("split_strategy"))),
-		SkipPlaceholderChapters: true,
 	}
 	if raw := strings.TrimSpace(string(c.FormValue("sample_chars"))); raw != "" {
 		if value, err := strconv.Atoi(raw); err == nil {
@@ -279,9 +278,6 @@ func localizeNovelImportWarningsWith(message func(key string, args ...any) strin
 		default:
 			if strings.HasPrefix(warning, book.NovelImportRegexFallbackWarningPrefix) {
 				preview.Warnings[i] = message("api.novelImport.regexFallbackWarning", "detail", strings.TrimPrefix(warning, book.NovelImportRegexFallbackWarningPrefix))
-			}
-			if strings.HasPrefix(warning, book.NovelImportPlaceholderSkippedWarningPrefix) {
-				preview.Warnings[i] = message("api.novelImport.placeholderSkippedWarning", "count", strings.TrimPrefix(warning, book.NovelImportPlaceholderSkippedWarningPrefix))
 			}
 		}
 	}

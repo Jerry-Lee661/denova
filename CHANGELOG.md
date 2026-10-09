@@ -14,10 +14,8 @@ Denova records only major user-visible features, important compatibility or data
 
 ### Added / 新增
 
-- 小说导入支持 CHM 与 EPUB 文件：导入现有小说现在可以选择 `.chm`（微软编译 HTML 帮助）或 `.epub` 文件，并保留其自身的目录树结构——一级目录成为卷、三级条目成为章（章标题带上二级分组前缀），更深层内容并入所属章并按层级生成小节标题，未收录进目录的散页按所在文件夹归入同名卷；标题/正文自动识别 GBK/GB18030 等编码并转换为 Markdown。分章预览与确认导入流程与 txt/md 一致，也支持自定义正则重切。
-- Novel import now supports CHM and EPUB files: importing an existing novel can pick `.chm` (Microsoft Compiled HTML Help) or `.epub` files and keeps their own table-of-contents structure — level-1 entries become volumes, level-3 entries become chapters titled with their level-2 group prefix, and deeper topics are merged into their chapter with hierarchical section headings; unlisted loose pages are grouped into a volume named after their folder. Titles and content are decoded from encodings such as GBK/GB18030 into Markdown. The preview and confirmation flow stays identical to txt/md, and custom regex re-splitting still works.
-- 导入时自动跳过内容过少的占位章节（卷名页、制作说明等），让真实章节编号不被占位条目顶开；跳过数量会在导入预览的警告中说明。
-- Import automatically skips placeholder chapters with too little content (volume title pages, production notes), so real chapters keep their numbering; the skipped count is reported in the import preview warnings.
+- 小说导入支持 CHM 与 EPUB 文件：导入现有小说现在可以选择 `.chm`（微软编译 HTML 帮助）或 `.epub` 文件，并保留其自身的目录树结构——一级目录成为卷、三级条目成为章（章标题带上二级分组前缀），更深层内容并入所属章并按层级生成小节标题，未收录进目录的散页按所在文件夹归入同名卷；标题/正文自动识别 GBK/GB18030 等编码并转换为 Markdown，章节文件名优先采用章节标题自带的序号（第一章 → ch00001）。分章预览与确认导入流程与 txt/md 一致，也支持自定义正则重切，支持导入到已有书籍。
+- Novel import now supports CHM and EPUB files: importing an existing novel can pick `.chm` (Microsoft Compiled HTML Help) or `.epub` files and keeps their own table-of-contents structure — level-1 entries become volumes, level-3 entries become chapters titled with their level-2 group prefix, and deeper topics are merged into their chapter with hierarchical section headings; unlisted loose pages are grouped into a volume named after their folder. Titles and content are decoded from encodings such as GBK/GB18030 into Markdown. The preview and confirmation flow stays identical to txt/md, and custom regex re-splitting still works.
 
 ## [v0.5.1] - 2026-09-28
 
