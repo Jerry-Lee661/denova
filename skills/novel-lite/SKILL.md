@@ -25,6 +25,7 @@ main Agent -> final output
 ## Tool requirements
 
 - When continuity matters, first use `read` for the relevant workspace files, such as `CREATOR.md`, `setting/outline.md`, `setting/progress.md`, `setting/character-states.md`, the current chapter-group plan, and recent chapters. For lore, use `list_lore_items` to identify relevant entries and `read_lore_items` to load their complete bodies.
+- When the location or wording of relevant material is unknown, use `search` to locate it and then read the located source in full; load the `recall` Skill for the complete retrieval order by content type.
 - If the user asks only for a passage, exploratory draft, or example in chat, output the prose directly and do not write workspace files.
 - When the user asks to create or update workspace prose, use `write` for a new file or complete rewrite and `edit` for localized replacement. `old_string` must match the current file exactly and uniquely and must not contain line-number prefixes returned by `read`.
 - Inspect every `write` or `edit` result. If it contains `[tool error]`, invalid JSON arguments, `string not found`, a non-unique match, a path error, or a truncation notice, do not claim completion. Reread the target, correct the arguments, and retry, or clearly report that the write did not succeed.

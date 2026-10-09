@@ -93,7 +93,7 @@ func renderWorkspacePathIndex(title string, sections []workspaceContextPathSecti
 
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "## %s\n\n", title)
-	sb.WriteString("Source: current book workspace snapshot. Entries are workspace-relative discovery paths only; file contents are intentionally omitted. Use `read` for known files, `glob` to discover additional paths, and `grep` for targeted searches. Read only the sources required by the current request and writing workflow. A path's presence does not prove that its file is non-empty or finalized.\n")
+	sb.WriteString("Source: current book workspace snapshot. Entries are workspace-relative discovery paths only; file contents are intentionally omitted. Use `read` for known files, `glob` to discover additional paths, `grep` for exact known strings, and `search` to locate content by meaning or keywords before reading it. Read only the sources required by the current request and writing workflow. A path's presence does not prove that its file is non-empty or finalized.\n")
 	for _, section := range sections {
 		if len(section.Paths) == 0 {
 			continue
