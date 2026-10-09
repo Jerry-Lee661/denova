@@ -52,6 +52,11 @@ func buildAgentTools(ctx context.Context, cfg *config.Config, spec agentToolsSpe
 	}
 	tools = append(tools, workspaceTools...)
 	tools = append(tools, skills.Tools...)
+	searchTools, err := catalog.BookSearch(settings)
+	if err != nil {
+		return agentToolsAssembly{}, err
+	}
+	tools = append(tools, searchTools...)
 	if spec.ExtraToolsFactory != nil {
 		extra, err := spec.ExtraToolsFactory(settings)
 		if err != nil {

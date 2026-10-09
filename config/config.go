@@ -41,6 +41,7 @@ type Config struct {
 	CustomAgents             []CustomAgentConfig          `toml:"custom_agents"`
 	DefaultImageAgentID      string                       `toml:"default_image_agent_id"`
 	WebAccess                WebAccessConfig              `toml:"web_access"`
+	Embedding                EmbeddingConfig              `toml:"embedding"`
 	Labs                     ResolvedLabs                 `toml:"labs"`
 	SkillsDir                string                       `toml:"skills_dir"`
 	BackendPort              int                          `toml:"backend_port"`
@@ -143,6 +144,7 @@ func configFromLayered(novaDir, workspace string, layered LayeredSettings) *Conf
 		CustomAgents:                s.CustomAgents,
 		DefaultImageAgentID:         settingsOptionalString(s.DefaultImageAgentID),
 		WebAccess:                   ResolveWebAccessSettings(s.WebAccess),
+		Embedding:                   ResolveEmbeddingConfig(s.Embedding),
 		Labs:                        ResolveLabs(s.Labs),
 		SkillsDir:                   s.SkillsDir,
 		BackendPort:                 settingsInt(s.BackendPort, 8080),
@@ -288,6 +290,7 @@ func settingsFromConfig(cfg *Config) Settings {
 		CustomAgents:             cfg.CustomAgents,
 		DefaultImageAgentID:      stringPtr(cfg.DefaultImageAgentID),
 		WebAccess:                settingsFromWebAccessConfig(cfg.WebAccess),
+		Embedding:                settingsFromEmbeddingConfig(cfg.Embedding),
 		Labs: LabSettings{
 			DeveloperMode: boolPtr(cfg.Labs.DeveloperMode),
 		},

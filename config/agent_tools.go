@@ -22,6 +22,7 @@ const (
 	AgentToolEventRead       = "event_read"
 	AgentToolLoreRead        = "lore_read"
 	AgentToolLoreWrite       = "lore_write"
+	AgentToolBookSearch      = "book_search"
 	AgentToolImageGeneration = "image_generation"
 )
 
@@ -81,6 +82,7 @@ func DefaultAgentToolSettings() AgentToolSettings {
 		AgentToolScript,
 		AgentToolLoreRead,
 		AgentToolLoreWrite,
+		AgentToolBookSearch,
 	)
 	defaults[AgentToolConfigRead] = false
 	defaults[AgentToolConfigApply] = false

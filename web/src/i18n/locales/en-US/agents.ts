@@ -60,6 +60,8 @@ const agents = {
   'agents.tool.loreRead.interactiveSubtitle': 'list_lore_items / read_lore_items / search_story_history',
   'agents.tool.loreWrite.title': 'Write Lore',
   'agents.tool.loreWrite.subtitle': 'write_lore_items',
+  'agents.tool.bookSearch.title': 'Workspace Search',
+  'agents.tool.bookSearch.subtitle': 'search',
   'agents.tool.todo.title': 'Task List',
   'agents.tool.todo.subtitle': 'todo',
   'agents.tool.delegation.title': 'Task Delegation',

@@ -60,6 +60,8 @@ const agents = {
   'agents.tool.loreRead.interactiveSubtitle': 'list_lore_items / read_lore_items / search_story_history',
   'agents.tool.loreWrite.title': '写入资料库',
   'agents.tool.loreWrite.subtitle': 'write_lore_items',
+  'agents.tool.bookSearch.title': '检索书稿',
+  'agents.tool.bookSearch.subtitle': 'search',
   'agents.tool.todo.title': '任务清单',
   'agents.tool.todo.subtitle': 'todo',
   'agents.tool.delegation.title': '委派任务',
