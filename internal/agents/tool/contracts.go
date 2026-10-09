@@ -28,7 +28,9 @@ const (
 	ToolSourceShell = agent.ToolSourceShell
 	// ToolSourceLore is Denova's product-specific lore capability. Public Agent
 	// tool vocabulary intentionally remains product-neutral.
-	ToolSourceLore    = agent.ToolSource("denova.lore")
+	ToolSourceLore = agent.ToolSource("denova.lore")
+	// ToolSourceSearch is Denova's product-specific hybrid workspace search.
+	ToolSourceSearch  = agent.ToolSource("denova.search")
 	ToolSourceHistory = agent.ToolSourceHistory
 	ToolSourceWeb     = agent.ToolSourceWeb
 	ToolSourceImage   = agent.ToolSourceImage

@@ -60,6 +60,19 @@ func (catalog *Catalog) Lore(forceReadOnly bool) Factory {
 	return loreToolsFactory(catalog.cfg, forceReadOnly)
 }
 
+// BookSearch registers the hybrid workspace search tool. It always serves the
+// keyword channel and adds semantic ranking when an embedding endpoint is
+// configured; a failing endpoint degrades to keyword results.
+func (catalog *Catalog) BookSearch(settings config.ResolvedAgentToolSettings) ([]agent.ToolDefinition, error) {
+	if !settings.Allows(config.AgentToolBookSearch) {
+		return nil, nil
+	}
+	if catalog == nil || catalog.cfg == nil {
+		return nil, nil
+	}
+	return newSearchTools(catalog.cfg.Workspace, catalog.cfg.ProjectStoreDir, catalog.cfg.Embedding)
+}
+
 func (catalog *Catalog) IDE() Factory { return ideToolsFactory(catalog.cfg) }
 
 func (catalog *Catalog) Image() Factory { return imageToolsFactory(catalog.cfg) }

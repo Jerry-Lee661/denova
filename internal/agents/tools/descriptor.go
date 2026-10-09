@@ -18,6 +18,7 @@ const defaultToolResultMaxBytes = config.DefaultAgentToolResultLimitKB * 1024
 
 const (
 	ToolSourceLore    = agenttool.ToolSourceLore
+	ToolSourceSearch  = agenttool.ToolSourceSearch
 	ToolSourceHistory = agent.ToolSourceHistory
 	ToolSourceWeb     = agent.ToolSourceWeb
 	ToolSourceImage   = agent.ToolSourceImage
