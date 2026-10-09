@@ -387,11 +387,32 @@ func parseNovelImport(filename string, data []byte, opts NovelImportOptions) (pa
 	title := strings.TrimSuffix(filepath.Base(name), filepath.Ext(name))
 	totalChars := 0
 	volumePaths := assignVolumePaths(chapters)
+	// Honor ordinals the author embedded in chapter titles (第一章 → 1) so
+	// filenames keep matching titles even when placeholder chapters were
+	// skipped; titles without ordinals fill the remaining slots in reading
+	// order.
+	usedIndexes := map[int]bool{}
+	for i := range chapters {
+		if n, ok := chapterNumberFromTitle(chapters[i].Title); ok && n <= 99999 && !usedIndexes[n] {
+			chapters[i].Index = n
+			usedIndexes[n] = true
+		}
+	}
+	nextFree := 1
+	for i := range chapters {
+		if chapters[i].Index > 0 {
+			continue
+		}
+		for usedIndexes[nextFree] {
+			nextFree++
+		}
+		chapters[i].Index = nextFree
+		usedIndexes[nextFree] = true
+	}
 	for i := range chapters {
 		if ext == ".txt" {
 			chapters[i].Content = formatPlainTextChapterForMarkdown(chapters[i].Content)
 		}
-		chapters[i].Index = i + 1
 		chapters[i].Path = chapterPath(chapters[i].Index, chapters[i].Title, chapters[i].Volume, volumePaths, language)
 		if chapters[i].Volume != "" {
 			chapters[i].VolumePath = volumePaths[chapters[i].Volume]

@@ -129,6 +129,7 @@ func (h *Handlers) HandleNovelImport(ctx context.Context, c *app.RequestContext)
 	}
 	author := strings.TrimSpace(string(c.FormValue("author")))
 	description := strings.TrimSpace(string(c.FormValue("description")))
+	targetProjectID := strings.TrimSpace(string(c.FormValue("target_project_id")))
 
 	layered, err := h.app.SettingsService().Snapshot(appsettings.Global())
 	if err != nil {
@@ -137,6 +138,35 @@ func (h *Handlers) HandleNovelImport(ctx context.Context, c *app.RequestContext)
 	}
 	if layered.Paths.DenovaDir == "" {
 		writeErrorKey(c, consts.StatusInternalServerError, "api.books.novaDirMissing")
+		return
+	}
+
+	// Importing into an existing book appends chapters to its workspace
+	// (numbering continues past existing chapters, matching volume
+	// directories are reused) instead of creating a new book.
+	if targetProjectID != "" {
+		workspace, workspaceErr := h.app.ProjectBook().Workspace(targetProjectID)
+		if workspaceErr != nil {
+			slog.WarnContext(ctx, fmt.Sprintf("[api] Novel import target resolution failed project_id=%q err=%v", targetProjectID, workspaceErr))
+			writeProjectBookError(c, workspaceErr, "api.novelImport.importFailed")
+			return
+		}
+		importPreview, paths, skippedExisting, importErr := book.ImportNovelToWorkspace(workspace, filename, data, opts)
+		if importErr != nil {
+			slog.ErrorContext(ctx, fmt.Sprintf("[api] Novel import confirmation failed project_id=%q workspace=%q err=%v", targetProjectID, workspace, importErr))
+			writeErrorKey(c, consts.StatusInternalServerError, "api.novelImport.importFailed", "detail", importErr.Error())
+			return
+		}
+		slog.WarnContext(ctx, fmt.Sprintf("[api] Novel import appended workspace=%q strategy=%s chapters=%d paths=%d skipped_existing=%d warnings=%v", workspace, importPreview.SplitStrategy, importPreview.ChapterCount, len(paths), skippedExisting, importPreview.Warnings))
+		writeJSON(c, consts.StatusOK, book.NovelImportResult{
+			Workspace:       workspace,
+			Title:           importPreview.Title,
+			ChapterCount:    len(paths),
+			TotalChars:      importPreview.TotalChars,
+			ChapterPaths:    paths,
+			SkippedExisting: skippedExisting,
+			Message:         messageKey(c, "api.novelImport.imported"),
+		})
 		return
 	}
 
@@ -150,7 +180,7 @@ func (h *Handlers) HandleNovelImport(ctx context.Context, c *app.RequestContext)
 		writeErrorKey(c, status, "api.novelImport.importFailed", "detail", err.Error())
 		return
 	}
-	importPreview, paths, err := book.ImportNovelToWorkspace(created.Workspace, filename, data, opts)
+	importPreview, paths, _, err := book.ImportNovelToWorkspace(created.Workspace, filename, data, opts)
 	if err != nil {
 		slog.ErrorContext(ctx, fmt.Sprintf("[api] Novel import confirmation failed filename=%q workspace=%q err=%v", filename, created.Workspace, err))
 		writeErrorKey(c, consts.StatusInternalServerError, "api.novelImport.importFailed", "detail", err.Error())
