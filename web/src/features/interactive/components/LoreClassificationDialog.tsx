@@ -1,7 +1,7 @@
 import { InlineErrorNotice } from '@/components/common/inline-error-notice'
 import { errorMessage } from '@/lib/error-diagnostics'
 import { useEffect, useMemo, useState } from 'react'
-import { Loader2, RefreshCw, Tags } from 'lucide-react'
+import { Loader2, RefreshCw, Sparkles, Tags } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from '@/lib/toast'
 import { applyLoreClassification, previewLoreClassification, type LoreClassificationMode, type LoreClassificationPreview, type LoreItem } from '@/lib/api'
@@ -26,6 +26,7 @@ export function LoreClassificationDialog({
 }) {
   const { t } = useTranslation()
   const [mode, setMode] = useState<LoreClassificationMode>('semantic')
+  const [forceSemantic, setForceSemantic] = useState(false)
   const [preview, setPreview] = useState<LoreClassificationPreview | null>(null)
   const [types, setTypes] = useState<Record<string, LoreItem['type']>>({})
   const [selected, setSelected] = useState<Set<string>>(new Set())
@@ -39,7 +40,7 @@ export function LoreClassificationDialog({
     let cancelled = false
     setLoading(true)
     setError('')
-    previewLoreClassification(projectId, { mode })
+    previewLoreClassification(projectId, { mode, force_semantic: forceSemantic })
       .then((result) => {
         if (cancelled) return
         const nextTypes: Record<string, LoreItem['type']> = {}
@@ -64,7 +65,13 @@ export function LoreClassificationDialog({
     return () => {
       cancelled = true
     }
-  }, [mode, open, projectId, refreshToken, t])
+  }, [forceSemantic, mode, open, projectId, refreshToken, t])
+
+  // A forced run belongs to the preview the user asked for; reopening the
+  // dialog returns to the scope the semantic toggle describes.
+  useEffect(() => {
+    if (!open) setForceSemantic(false)
+  }, [open])
 
   const changes = useMemo(() => {
     if (!preview) return []
@@ -117,7 +124,10 @@ export function LoreClassificationDialog({
           </div>
           <Switch
             checked={mode === 'semantic'}
-            onCheckedChange={(checked) => setMode(checked ? 'semantic' : 'heuristic')}
+            onCheckedChange={(checked) => {
+              setForceSemantic(false)
+              setMode(checked ? 'semantic' : 'heuristic')
+            }}
             disabled={loading || applying}
             aria-label={t('settingPanel.loreClassification.semantic')}
           />
@@ -176,7 +186,22 @@ export function LoreClassificationDialog({
 
         <DialogFooter className="flex-row flex-wrap items-center gap-2 sm:justify-between">
           <div className="w-full text-[11px] text-[var(--nova-text-faint)] sm:mr-auto sm:w-auto">{t('settingPanel.loreClassification.selected', { count: changes.length })}</div>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={loading || applying}
+            title={t('settingPanel.loreClassification.analyzeWithAIHint')}
+            onClick={() => {
+              setMode('semantic')
+              setForceSemantic(true)
+              setPreview(null)
+              setRefreshToken((current) => current + 1)
+            }}
+          >
+            <Sparkles className="h-3.5 w-3.5" />{t('settingPanel.loreClassification.analyzeWithAI')}
+          </Button>
           <Button variant="outline" size="sm" disabled={loading || applying} onClick={() => {
+            setForceSemantic(false)
             setPreview(null)
             setRefreshToken((current) => current + 1)
           }}>

@@ -808,6 +808,8 @@ export type LoreClassificationMode = 'heuristic' | 'semantic'
 export interface LoreClassificationPreviewRequest {
   item_ids?: string[]
   mode?: LoreClassificationMode
+  /** Sends every selected item to the model, including names the local rules already resolved. Implies semantic mode. */
+  force_semantic?: boolean
 }
 
 export interface LoreClassificationPreviewItem {

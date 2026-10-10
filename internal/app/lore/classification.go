@@ -3,7 +3,6 @@ package loreapp
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"strings"
 
 	agentcontext "denova/internal/agents/context"
@@ -18,6 +17,9 @@ const (
 type ClassificationPreviewRequest struct {
 	ItemIDs []string `json:"item_ids,omitempty"`
 	Mode    string   `json:"mode,omitempty"`
+	// ForceSemantic sends every selected item to the model, including items the
+	// local name rules already resolved. It implies the semantic mode.
+	ForceSemantic bool `json:"force_semantic,omitempty"`
 }
 
 type ClassificationPreviewItem struct {
@@ -75,7 +77,9 @@ func (service *Service) PreviewClassification(ctx context.Context, projectID str
 	}
 	selected := selectClassificationCandidates(items, request.ItemIDs)
 	mode := strings.ToLower(strings.TrimSpace(request.Mode))
-	if mode != booklore.ClassificationModeSemantic {
+	if request.ForceSemantic {
+		mode = booklore.ClassificationModeSemantic
+	} else if mode != booklore.ClassificationModeSemantic {
 		mode = booklore.ClassificationModeHeuristic
 	}
 	preview := ClassificationPreview{
@@ -86,8 +90,6 @@ func (service *Service) PreviewClassification(ctx context.Context, projectID str
 	}
 	semanticInputs := make([]booklore.ClassificationInput, 0, len(selected))
 	previewIndexByID := make(map[string]int, len(selected))
-	usedBytes := 2
-	semanticEligible := 0
 	for _, item := range selected {
 		input := classificationInputFromItem(item)
 		suggestion := booklore.ClassifyItemHeuristic(input)
@@ -97,25 +99,27 @@ func (service *Service) PreviewClassification(ctx context.Context, projectID str
 			SuggestionSource: booklore.TypeSourceHeuristic,
 		})
 		previewIndexByID[item.ID] = len(preview.Items) - 1
-		if mode != booklore.ClassificationModeSemantic || suggestion.Confidence == booklore.ClassificationConfidenceHigh {
+		if mode != booklore.ClassificationModeSemantic {
 			continue
 		}
-		semanticEligible++
-		encoded, marshalErr := json.Marshal(input)
-		if marshalErr != nil {
-			return ClassificationPreview{}, marshalErr
-		}
-		if usedBytes+len(encoded)+1 > classificationPreviewMaxBytes {
+		// A forced run consults the model for every item; otherwise only the
+		// entries the local name rules could not settle.
+		if !request.ForceSemantic && suggestion.Confidence == booklore.ClassificationConfidenceHigh {
 			continue
 		}
-		usedBytes += len(encoded) + 1
 		semanticInputs = append(semanticInputs, input)
 	}
 	if mode == booklore.ClassificationModeSemantic && len(semanticInputs) > 0 {
-		suggestions, classifyErr := service.host.ClassifyLoreItems(runtime.Context(), projectID, semanticInputs)
-		if classifyErr != nil {
-			preview.Warning = "Semantic classification is temporarily unavailable; local name analysis is shown. / 语义分类暂时不可用，当前展示本地名称分析结果：" + classifyErr.Error()
-		} else {
+		batches, batchErr := splitClassificationBatches(semanticInputs)
+		if batchErr != nil {
+			return ClassificationPreview{}, batchErr
+		}
+		for _, batch := range batches {
+			suggestions, classifyErr := service.host.ClassifyLoreItems(runtime.Context(), projectID, batch)
+			if classifyErr != nil {
+				preview.Warning = "Semantic classification is temporarily unavailable; local name analysis is shown. / 语义分类暂时不可用，当前展示本地名称分析结果：" + classifyErr.Error()
+				break
+			}
 			for _, suggestion := range suggestions {
 				index, ok := previewIndexByID[strings.TrimSpace(suggestion.ID)]
 				if !ok {
@@ -128,19 +132,37 @@ func (service *Service) PreviewClassification(ctx context.Context, projectID str
 			}
 		}
 	}
-	if mode == booklore.ClassificationModeSemantic {
-		if omitted := semanticEligible - len(semanticInputs); omitted > 0 && preview.Warning == "" {
-			preview.Warning = fmt.Sprintf(
-				"Classification input reached the %d KiB limit; %d items keep local analysis results. / 分类输入达到 %d KiB 上限；%d 条保留本地分析结果",
-				classificationPreviewMaxBytes/1024, omitted,
-				classificationPreviewMaxBytes/1024, omitted,
-			)
-		}
-	}
 	for _, item := range preview.Items {
 		preview.Counts[item.SuggestedType]++
 	}
 	return preview, nil
+}
+
+// splitClassificationBatches keeps every model call within the input limit so a
+// large library is covered by several calls instead of keeping the overflow on
+// name-rule results. An oversized single input still forms its own batch.
+func splitClassificationBatches(inputs []booklore.ClassificationInput) ([][]booklore.ClassificationInput, error) {
+	batches := make([][]booklore.ClassificationInput, 0, 1)
+	current := make([]booklore.ClassificationInput, 0, len(inputs))
+	usedBytes := 2
+	for _, input := range inputs {
+		encoded, err := json.Marshal(input)
+		if err != nil {
+			return nil, err
+		}
+		size := len(encoded) + 1
+		if len(current) > 0 && usedBytes+size > classificationPreviewMaxBytes {
+			batches = append(batches, current)
+			current = make([]booklore.ClassificationInput, 0, len(inputs))
+			usedBytes = 2
+		}
+		current = append(current, input)
+		usedBytes += size
+	}
+	if len(current) > 0 {
+		batches = append(batches, current)
+	}
+	return batches, nil
 }
 
 func (service *Service) ApplyClassification(ctx context.Context, projectID string, request ClassificationApplyRequest) (booklore.TypeApplyResult, error) {
